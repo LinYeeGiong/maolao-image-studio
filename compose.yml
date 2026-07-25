@@ -1,0 +1,30 @@
+name: maolao-image-studio
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      MAOLAO_BASE_URL: ${MAOLAO_BASE_URL:-https://maolaoapi.com}
+      MAOLAO_API_KEY: ${MAOLAO_API_KEY:?请先在 .env 中填写 MAOLAO_API_KEY}
+    expose:
+      - "8000"
+    dns:
+    - 1.1.1.1
+    - 8.8.8.8
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_URL: ""
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
