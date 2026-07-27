@@ -40,4 +40,5 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 WORKDIR /app/backend/
 
-CMD ["fastapi", "run", "--workers", "4"]
+# One process owns the background pollers. Pending tasks resume on startup.
+CMD ["fastapi", "run", "--workers", "1"]

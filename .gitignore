@@ -10,3 +10,4 @@ node_modules/
 .docker-local/
 .uv-cache/
 .uv-python/
+data/

@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "Maolao Image Studio"
     MAOLAO_BASE_URL: str = "https://maolaoapi.com"
     MAOLAO_API_KEY: str = ""
+    DATA_DIR: str = "/data"
+    TASK_POLL_INTERVAL_SECONDS: float = 2.5
 
 
 settings = Settings()

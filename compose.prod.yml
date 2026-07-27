@@ -2,35 +2,31 @@ name: maolao-image-studio
 
 services:
   backend:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
+    image: ${BACKEND_IMAGE:-ghcr.io/linyeegiong/maolao-image-studio-backend:latest}
+    pull_policy: always
     restart: unless-stopped
     env_file:
       - .env
     environment:
       MAOLAO_BASE_URL: ${MAOLAO_BASE_URL:-https://maolaoapi.com}
       DATA_DIR: /data
-      MAOLAO_API_KEY: ${MAOLAO_API_KEY:?请先在 .env 中填写 MAOLAO_API_KEY}
+      MAOLAO_API_KEY: ${MAOLAO_API_KEY:?Set MAOLAO_API_KEY in .env}
     expose:
       - "8000"
     volumes:
       - maolao_data:/data
     dns:
-    - 1.1.1.1
-    - 8.8.8.8
+      - 1.1.1.1
+      - 8.8.8.8
 
   frontend:
-    build:
-      context: .
-      dockerfile: frontend/Dockerfile
-      args:
-        VITE_API_URL: ""
+    image: ${FRONTEND_IMAGE:-ghcr.io/linyeegiong/maolao-image-studio-frontend:latest}
+    pull_policy: always
     restart: unless-stopped
     depends_on:
       - backend
     ports:
-      - "5173:80"
+      - "${APP_HOST:-127.0.0.1}:${APP_PORT:-7820}:80"
 
 volumes:
   maolao_data:

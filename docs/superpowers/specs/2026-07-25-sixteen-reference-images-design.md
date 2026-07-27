@@ -10,7 +10,7 @@
 - 提交时，每张图片以本地表单字段 `images` 重复追加。若本轮没有新上传图片，仍可提交一个 `source_image_id` 继承历史生成图。
 - 后端同时兼容旧字段 `image` 和新字段 `images`，合并后校验总数不超过 16。
 - 每张上传图片继续写入现有 `images` 表，`kind='reference'`，使用 `position` 保存顺序，因此不需要数据库迁移。
-- 发往 MaolaoAPI 时，单图使用文档现有的 `image` 字段；多图按 OpenAI 数组格式重复发送 `image[]` 字段。必须使用 multipart tuple 列表，避免字典覆盖同名字段。
+- 发往 MaolaoAPI 时，无论单图还是多图，均使用文档记录的 `image` 字段，多图时重复该字段名（而非 `image[]` 数组语法，MaolaoAPI 官方文档未记录该语法，实测会导致任务失败）。必须使用 multipart tuple 列表，避免字典覆盖同名字段。
 
 ## 前端交互
 

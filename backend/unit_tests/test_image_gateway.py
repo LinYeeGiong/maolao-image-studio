@@ -16,7 +16,7 @@ def test_builds_json_generation_request_without_reference_image() -> None:
         prompt="a neon cat",
         size="2880x2880",
         n=3,
-        reference_image=None,
+        reference_images=[],
     )
 
     assert request.action == "generations"
@@ -39,7 +39,7 @@ def test_builds_multipart_edit_request_with_reference_image() -> None:
         prompt="keep the subject",
         size="2160x3840",
         n=2,
-        reference_image=reference,
+        reference_images=[reference],
     )
 
     assert request.action == "edits"
@@ -53,4 +53,24 @@ def test_builds_multipart_edit_request_with_reference_image() -> None:
         "size": "2160x3840",
     }
     assert request.files is not None
-    assert request.files["image"][0] == "reference.png"
+    assert request.files[0][0] == "image"
+    assert request.files[0][1][0] == "reference.png"
+
+
+def test_builds_multipart_request_with_repeated_image_field_for_multiple_images() -> None:
+    references = [
+        ("first.png", BytesIO(b"first"), "image/png"),
+        ("second.webp", BytesIO(b"second"), "image/webp"),
+    ]
+
+    request = build_maolao_request(
+        prompt="combine both subjects",
+        size="2880x2880",
+        n=1,
+        reference_images=references,
+    )
+
+    assert request.action == "edits"
+    assert request.files is not None
+    assert [field for field, _ in request.files] == ["image", "image"]
+    assert [upload[0] for _, upload in request.files] == ["first.png", "second.webp"]

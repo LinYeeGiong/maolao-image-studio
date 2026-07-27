@@ -1,249 +1,322 @@
-import { Clock3, ImagePlus, LoaderCircle, Sparkles, Upload, X } from "lucide-react"
-import { type FormEvent, useEffect, useRef, useState } from "react"
+import {
+  Check, ChevronDown, Clock3, Download, ImagePlus, Menu, MessageSquare,
+  Paperclip, Pencil, Plus, Search, Send, Sparkles, Trash2, X,
+} from "lucide-react"
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 const API_BASE = import.meta.env.VITE_API_URL || ""
-
+const MAX_REFERENCE_IMAGES = 16
 const SIZE_OPTIONS = [
-  { value: "2880x2880", label: "正方形", ratio: "1:1", pixels: "2880 × 2880", shape: "square" },
-  { value: "3840x2160", label: "横屏", ratio: "16:9", pixels: "3840 × 2160", shape: "landscape" },
-  { value: "2160x3840", label: "竖屏", ratio: "9:16", pixels: "2160 × 3840", shape: "portrait" },
+  { value: "2880x2880", label: "正方形", ratio: "1:1", pixels: "2880 × 2880" },
+  { value: "3840x2160", label: "横屏", ratio: "16:9", pixels: "3840 × 2160" },
+  { value: "2160x3840", label: "竖屏", ratio: "9:16", pixels: "2160 × 3840" },
 ] as const
-
 type ImageSize = (typeof SIZE_OPTIONS)[number]["value"]
 
-type Task = {
-  task_id: string
-  status: "queued" | "processing" | "succeeded" | "failed"
-  progress?: string
-  result?: { data?: Array<{ url?: string }> }
-  error?: string
+type StudioImage = { id: string; kind: "reference" | "generated"; position: number; file_name: string; mime_type: string; url: string }
+type Turn = {
+  id: string; prompt: string; size: ImageSize; n: number; status: "queued" | "processing" | "succeeded" | "failed"
+  source_image_id?: string | null; error?: string | null; elapsed_seconds?: number | null; created_at: string; images: StudioImage[]
 }
+type Conversation = { id: string; title: string; updated_at: string; turn_count: number; last_status?: string | null; turns?: Turn[] }
+type ModalState =
+  | { type: "delete"; conversationId: string; title: string }
+  | { type: "rename" }
 
-async function readJson(response: Response) {
+async function request<T>(url: string, options?: RequestInit): Promise<T> {
+  const response = await fetch(`${API_BASE}${url}`, options)
+  if (response.status === 204) return undefined as T
   const body = await response.json().catch(() => null)
   if (!response.ok) {
-    const message = body?.detail?.error?.message || body?.detail?.message || body?.detail || body?.error?.message || `请求失败 (${response.status})`
-    throw new Error(typeof message === "string" ? message : JSON.stringify(message))
+    const detail = body?.detail
+    throw new Error(typeof detail === "string" ? detail : detail?.message || `请求失败 (${response.status})`)
   }
   return body
 }
 
-function sleep(ms: number, signal: AbortSignal) {
-  return new Promise<void>((resolve, reject) => {
-    const timer = window.setTimeout(resolve, ms)
-    signal.addEventListener("abort", () => {
-      window.clearTimeout(timer)
-      reject(new DOMException("Aborted", "AbortError"))
-    }, { once: true })
-  })
+function mediaUrl(url: string) { return url.startsWith("http") ? url : `${API_BASE}${url}` }
+function formatDate(value: string) {
+  const date = new Date(value)
+  const today = new Date()
+  return date.toDateString() === today.toDateString()
+    ? date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
+    : date.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })
 }
 
 export default function ImageGenerator() {
+  const [conversations, setConversations] = useState<Conversation[]>([])
+  const [activeId, setActiveId] = useState<string | null>(null)
+  const [conversation, setConversation] = useState<Conversation | null>(null)
   const [prompt, setPrompt] = useState("")
   const [size, setSize] = useState<ImageSize>("2880x2880")
   const [count, setCount] = useState(1)
-  const [file, setFile] = useState<File | null>(null)
-  const [preview, setPreview] = useState("")
-  const [task, setTask] = useState<Task | null>(null)
-  const [images, setImages] = useState<string[]>([])
+  const [files, setFiles] = useState<File[]>([])
+  const [sourceImage, setSourceImage] = useState<StudioImage | null>(null)
+  const [previews, setPreviews] = useState<string[]>([])
+  const [search, setSearch] = useState("")
+  const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState("")
-  const [busy, setBusy] = useState(false)
-  const [elapsedSeconds, setElapsedSeconds] = useState(0)
-  const controllerRef = useRef<AbortController | null>(null)
-  const startedAtRef = useRef<number | null>(null)
+  const [modal, setModal] = useState<ModalState | null>(null)
+  const [renameTitle, setRenameTitle] = useState("")
+  const [modalBusy, setModalBusy] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [parametersOpen, setParametersOpen] = useState(false)
+  const [now, setNow] = useState(Date.now())
+  const bottomRef = useRef<HTMLDivElement>(null)
+  const promptRef = useRef<HTMLTextAreaElement>(null)
+
+  const loadConversations = useCallback(async () => {
+    const items = await request<Conversation[]>("/api/v1/conversations")
+    setConversations(items)
+    return items
+  }, [])
+
+  const loadConversation = useCallback(async (id: string, inherit = false) => {
+    const item = await request<Conversation>(`/api/v1/conversations/${id}`)
+    setConversation(item)
+    if (inherit && item.turns?.length) {
+      const last = item.turns[item.turns.length - 1]
+      setSize(last.size)
+      setCount(last.n)
+    }
+    return item
+  }, [])
 
   useEffect(() => {
-    if (!file) {
-      setPreview("")
-      return
-    }
-    const url = URL.createObjectURL(file)
-    setPreview(url)
-    return () => URL.revokeObjectURL(url)
-  }, [file])
-
-  useEffect(() => () => controllerRef.current?.abort(), [])
+    loadConversations().then((items) => {
+      if (items[0]) setActiveId(items[0].id)
+    }).catch((caught) => setError(caught.message))
+  }, [loadConversations])
 
   useEffect(() => {
-    if (!busy || startedAtRef.current === null) return
-    const updateElapsed = () => {
-      if (startedAtRef.current !== null) {
-        setElapsedSeconds((performance.now() - startedAtRef.current) / 1000)
-      }
-    }
-    updateElapsed()
-    const timer = window.setInterval(updateElapsed, 100)
+    setSourceImage(null)
+    setFiles([])
+    if (!activeId) { setConversation(null); return }
+    loadConversation(activeId, true).catch((caught) => setError(caught.message))
+  }, [activeId, loadConversation])
+
+  useEffect(() => {
+    if (!activeId) return
+    const interval = window.setInterval(() => {
+      loadConversation(activeId).catch(() => undefined)
+      loadConversations().catch(() => undefined)
+    }, 2500)
+    return () => window.clearInterval(interval)
+  }, [activeId, loadConversation, loadConversations])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 250)
     return () => window.clearInterval(timer)
-  }, [busy])
+  }, [])
+
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }) }, [conversation?.turns?.length])
+  useEffect(() => {
+    const textarea = promptRef.current
+    if (!textarea) return
+    textarea.style.height = "auto"
+    const maxHeight = 220
+    textarea.style.height = `${Math.max(76, Math.min(textarea.scrollHeight, maxHeight))}px`
+    textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden"
+  }, [prompt])
+  useEffect(() => {
+    const urls = files.map((file) => URL.createObjectURL(file))
+    setPreviews(urls)
+    return () => urls.forEach((url) => URL.revokeObjectURL(url))
+  }, [files])
+
+  const filtered = useMemo(() => conversations.filter((item) => item.title.toLowerCase().includes(search.toLowerCase())), [conversations, search])
+  const currentSize = SIZE_OPTIONS.find((option) => option.value === size)!
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault()
-    if (!prompt.trim() || busy) return
-
-    controllerRef.current?.abort()
-    const controller = new AbortController()
-    controllerRef.current = controller
-    setBusy(true)
-    setError("")
-    setImages([])
-    setTask(null)
-    startedAtRef.current = performance.now()
-    setElapsedSeconds(0)
-
+    if (!prompt.trim() || submitting) return
+    setSubmitting(true); setError("")
     try {
+      let id = activeId
+      if (!id) {
+        const created = await request<Conversation>("/api/v1/conversations", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "新对话" }),
+        })
+        id = created.id
+        setActiveId(id)
+      }
       const form = new FormData()
-      form.append("prompt", prompt.trim())
-      form.append("size", size)
-      form.append("n", String(count))
-      if (file) form.append("image", file)
-
-      const submitted = await readJson(await fetch(`${API_BASE}/api/v1/images/tasks`, {
-        method: "POST",
-        body: form,
-        signal: controller.signal,
-      }))
-      let current: Task = { task_id: submitted.task_id, status: submitted.status || "queued" }
-      setTask(current)
-
-      while (!controller.signal.aborted) {
-        if (current.status === "succeeded") {
-          const delivered = current.result?.data || []
-          setImages(delivered.map((item, index) => item.url?.startsWith("http")
-            ? item.url
-            : `${API_BASE}/api/v1/images/tasks/${encodeURIComponent(current.task_id)}/content/${index}`))
-          return
-        }
-        if (current.status === "failed") throw new Error(current.error || "图片生成失败")
-        await sleep(2500, controller.signal)
-        current = await readJson(await fetch(
-          `${API_BASE}/api/v1/images/tasks/${encodeURIComponent(current.task_id)}`,
-          { signal: controller.signal },
-        ))
-        setTask(current)
-      }
+      form.append("prompt", prompt.trim()); form.append("size", size); form.append("n", String(count))
+      if (files.length) files.forEach((file) => form.append("images", file))
+      if (sourceImage) form.append("source_image_id", sourceImage.id)
+      await request<Turn>(`/api/v1/conversations/${id}/turns`, { method: "POST", body: form })
+      setPrompt(""); setFiles([]); setSourceImage(null)
+      await Promise.all([loadConversation(id), loadConversations()])
     } catch (caught) {
-      if (caught instanceof DOMException && caught.name === "AbortError") return
-      setError(caught instanceof Error ? caught.message : "发生未知错误")
+      setError(caught instanceof Error ? caught.message : "提交失败")
+    } finally { setSubmitting(false) }
+  }
+
+  function addReferenceFiles(selected: FileList | null) {
+    const incoming = Array.from(selected || [])
+    if (!incoming.length) return
+    const capacity = MAX_REFERENCE_IMAGES - files.length - (sourceImage ? 1 : 0)
+    if (capacity <= 0) {
+      setError(`参考图最多支持 ${MAX_REFERENCE_IMAGES} 张`)
+      return
+    }
+    if (incoming.length > capacity) {
+      setError(`参考图最多支持 ${MAX_REFERENCE_IMAGES} 张，已保留前 ${capacity} 张新图片`)
+    }
+    setFiles([...files, ...incoming.slice(0, capacity)])
+  }
+
+  async function confirmDeleteConversation() {
+    if (modal?.type !== "delete" || modalBusy) return
+    setModalBusy(true)
+    try {
+      await request(`/api/v1/conversations/${modal.conversationId}`, { method: "DELETE" })
+      const remaining = await loadConversations()
+      setActiveId(remaining[0]?.id || null)
+      setModal(null)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "删除失败")
     } finally {
-      if (!controller.signal.aborted) {
-        if (startedAtRef.current !== null) {
-          setElapsedSeconds((performance.now() - startedAtRef.current) / 1000)
-        }
-        setBusy(false)
-      }
+      setModalBusy(false)
     }
   }
 
+  function openRenameModal() {
+    if (!conversation) return
+    setRenameTitle(conversation.title)
+    setModal({ type: "rename" })
+  }
+
+  async function submitRename(event: FormEvent) {
+    event.preventDefault()
+    const title = renameTitle.trim()
+    if (!conversation || !title || modalBusy) return
+    setModalBusy(true)
+    try {
+      await request(`/api/v1/conversations/${conversation.id}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title }),
+      })
+      await Promise.all([loadConversation(conversation.id), loadConversations()])
+      setModal(null)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "重命名失败")
+    } finally {
+      setModalBusy(false)
+    }
+  }
+
+  function chooseSource(image: StudioImage, turn: Turn) {
+    setSourceImage(image); setSize(turn.size); setCount(turn.n)
+    window.setTimeout(() => document.querySelector<HTMLTextAreaElement>("#prompt")?.focus(), 0)
+  }
+
   return (
-    <main className="page-shell">
-      <div className="ambient ambient-one" />
-      <div className="ambient ambient-two" />
-      <section className="hero">
-        <div className="eyebrow"><Sparkles size={15} /> Maolao Image Studio</div>
-        <h1>把你的想象，变成<span>超清画面</span></h1>
-        <p>输入描述即可生成；上传参考图时，会自动切换到图片编辑模式。</p>
-      </section>
+    <div className="app-shell">
+      <aside className={`sidebar ${sidebarOpen ? "open" : ""}`}>
+        <div className="brand"><div className="brand-mark"><Sparkles size={18} /></div><span>Maolao Studio</span><button onClick={() => setSidebarOpen(false)}><X size={18} /></button></div>
+        <button className="new-chat" onClick={() => { setActiveId(null); setSidebarOpen(false) }}><Plus size={17} /> 新建对话</button>
+        <label className="search-box"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索对话" /></label>
+        <div className="conversation-list">
+          <small>最近对话</small>
+          {filtered.map((item) => <div className={`conversation-row ${activeId === item.id ? "active" : ""}`} key={item.id}>
+            <button className="conversation-main" onClick={() => { setActiveId(item.id); setSidebarOpen(false) }}>
+              <MessageSquare size={16} /><span><strong>{item.title}</strong><em>{item.turn_count} 轮 · {formatDate(item.updated_at)}</em></span>
+            </button>
+            <button className="delete-chat" onClick={() => setModal({ type: "delete", conversationId: item.id, title: item.title })} title="删除"><Trash2 size={14} /></button>
+          </div>)}
+        </div>
+        <div className="sidebar-foot">模型：gpt-image-2-4k</div>
+      </aside>
+      {sidebarOpen && <button className="sidebar-mask" onClick={() => setSidebarOpen(false)} aria-label="关闭侧栏" />}
 
-      <section className="studio-card">
-        <form onSubmit={handleSubmit}>
-          <div className="field-head">
-            <label htmlFor="prompt">画面描述</label>
-            <span>模型 · gpt-image-2-4k</span>
-          </div>
-          <textarea id="prompt" value={prompt} onChange={(event) => setPrompt(event.target.value)}
-            placeholder="例如：一只穿宇航服的橘猫站在月球边缘，远处是蓝色地球，电影级光影，超精细……"
-            rows={6} maxLength={4000} disabled={busy} />
-          <div className="counter">{prompt.length} / 4000</div>
+      <main className="chat-area">
+        <header className="chat-header">
+          <button className="mobile-menu" onClick={() => setSidebarOpen(true)}><Menu size={20} /></button>
+          <div><strong>{conversation?.title || "新对话"}</strong><span>4K 图片创作与连续优化</span></div>
+          {conversation && <button className="header-action" onClick={openRenameModal}><Pencil size={15} /> 重命名</button>}
+        </header>
 
-          <div className="field-head size-head">
-            <label>画面比例</label>
-            <span>4K 输出尺寸</span>
-          </div>
-          <div className="size-options">
-            {SIZE_OPTIONS.map((option) => (
-              <label className={`size-option ${size === option.value ? "selected" : ""}`} key={option.value}>
-                <input
-                  type="radio"
-                  name="size"
-                  value={option.value}
-                  checked={size === option.value}
-                  onChange={() => setSize(option.value)}
-                  disabled={busy}
-                />
-                <span className={`ratio-shape ${option.shape}`} />
-                <span className="size-copy">
-                  <strong>{option.label} {option.ratio}</strong>
-                  <small>{option.pixels}</small>
-                </span>
-              </label>
-            ))}
-          </div>
+        <section className="messages">
+          {!conversation?.turns?.length ? <div className="welcome">
+            <div className="welcome-icon"><Sparkles size={28} /></div><h1>今天想创作什么？</h1>
+            <p>描述你的画面，或上传最多 16 张参考图。生成后可选择任意结果，用自然语言继续调整。</p>
+          </div> : conversation.turns.map((turn) => {
+            const generated = turn.images.filter((image) => image.kind === "generated")
+            const uploaded = turn.images.filter((image) => image.kind === "reference")
+            const elapsed = turn.elapsed_seconds ?? Math.max(0, (now - new Date(turn.created_at).getTime()) / 1000)
+            return <article className="turn" key={turn.id}>
+              <div className="user-message">
+                {uploaded.length > 0 && <div className={`user-reference-grid count-${Math.min(uploaded.length, 4)}`}>
+                  {uploaded.map((image, index) => <img key={image.id} src={mediaUrl(image.url)} alt={`上传的参考图 ${index + 1}`} />)}
+                </div>}
+                {turn.source_image_id && <span className="context-tag"><ImagePlus size={13} /> 基于上一张图继续优化</span>}
+                <p>{turn.prompt}</p><small>{SIZE_OPTIONS.find((item) => item.value === turn.size)?.ratio} / {turn.size} / {turn.n} 张</small>
+              </div>
+              <div className="assistant-message">
+                <div className="assistant-head"><span><Sparkles size={15} /> Maolao</span><em><Clock3 size={13} /> {elapsed.toFixed(1)} 秒</em></div>
+                {turn.status === "failed" ? <div className="turn-error">生成失败：{turn.error}</div> : generated.length ?
+                  <div className={`image-grid count-${Math.min(generated.length, 4)}`}>{generated.map((image) => <figure key={image.id}>
+                    <img src={mediaUrl(image.url)} alt={`生成结果 ${image.position + 1}`} loading="lazy" />
+                    <div className="image-actions"><button onClick={() => chooseSource(image, turn)}><Check size={14} /> 以此图继续优化</button><a href={mediaUrl(image.url)} download={image.file_name}><Download size={14} /></a></div>
+                  </figure>)}</div> : <div className="generating-card"><span className="loader" /><div><strong>正在生成 {turn.n} 张 4K 图片</strong><small>{turn.status === "queued" ? "任务排队中" : "AI 正在绘制，请稍候"}</small></div></div>}
+              </div>
+            </article>
+          })}
+          <div ref={bottomRef} />
+        </section>
 
-          <div className="field-head quantity-head">
-            <label htmlFor="count">生成数量</label>
-            <span>最多 128 张，以实际上游交付数量为准</span>
-          </div>
-          <div className="quantity-control">
-            <button type="button" onClick={() => setCount((value) => Math.max(1, value - 1))} disabled={busy || count <= 1} aria-label="减少生成数量">−</button>
-            <input
-              id="count"
-              type="number"
-              min="1"
-              max="128"
-              value={count}
-              onChange={(event) => setCount(Math.min(128, Math.max(1, Number(event.target.value) || 1)))}
-              disabled={busy}
-            />
-            <button type="button" onClick={() => setCount((value) => Math.min(128, value + 1))} disabled={busy || count >= 128} aria-label="增加生成数量">+</button>
-            <span>张图片</span>
-          </div>
-
-          <div className="field-head reference-head">
-            <label>参考图 <em>可选</em></label>
-            <span>{file ? "图片编辑模式" : "文生图模式"}</span>
-          </div>
-          {preview ? (
-            <div className="preview-box">
-              <img src={preview} alt="参考图预览" />
-              <div><strong>{file?.name}</strong><small>{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB` : ""}</small></div>
-              <button type="button" className="icon-button" onClick={() => setFile(null)} disabled={busy} aria-label="移除参考图"><X size={18} /></button>
+        <div className="composer-wrap">
+          {error && <div className="global-error">{error}<button onClick={() => setError("")}><X size={14} /></button></div>}
+          {(sourceImage || files.length > 0) && <div className="selected-images">
+            {files.length + (sourceImage ? 1 : 0) > 1 && (
+              <div className="selected-images-head"><span>参考图</span><strong>已选择 {files.length + (sourceImage ? 1 : 0)} / {MAX_REFERENCE_IMAGES}</strong></div>
+            )}
+            <div className="selected-images-row">
+              {sourceImage && <div className="selected-chip">
+                <img src={mediaUrl(sourceImage.url)} alt="已选择生成图" />
+                <span><strong>已选择生成图</strong><small>将在此图基础上继续优化</small></span>
+                <button type="button" onClick={() => setSourceImage(null)} aria-label="移除生成图"><X size={14} /></button>
+              </div>}
+              {files.map((file, index) => <div className="selected-chip" key={`${file.name}-${file.lastModified}-${index}`}>
+                <img src={previews[index]} alt={`参考图 ${index + 1}`} />
+                <span><strong>参考图 {index + 1}</strong><small>{file.name}</small></span>
+                <button type="button" onClick={() => setFiles(files.filter((_, itemIndex) => itemIndex !== index))} aria-label={`移除参考图 ${index + 1}`}><X size={14} /></button>
+              </div>)}
             </div>
-          ) : (
-            <label className="drop-zone">
-              <input type="file" accept="image/*" onChange={(event) => setFile(event.target.files?.[0] || null)} disabled={busy} />
-              <Upload size={24} /><strong>点击选择参考图</strong><span>支持 PNG、JPG、WebP 等常见图片格式</span>
-            </label>
-          )}
-          <button className="generate-button" disabled={!prompt.trim() || busy}>
-            {busy ? <LoaderCircle className="spin" size={20} /> : <Sparkles size={20} />}
-            {busy ? "正在生成，请稍候…" : "开始生成 4K 图片"}
-          </button>
-        </form>
-
-        <aside className="result-panel">
-          <div className="result-title">
-            <span>生成结果</span>
-            <div className="result-meta">
-              {task && <small>{task.progress || task.status}</small>}
-              {startedAtRef.current !== null && <span className="task-time"><Clock3 size={13} /> {elapsedSeconds.toFixed(1)} 秒</span>}
+          </div>}
+          <form className="composer" onSubmit={handleSubmit}>
+            <textarea ref={promptRef} id="prompt" value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() }
+            }} placeholder={sourceImage ? "告诉我还需要怎样调整…" : "描述你想生成的画面…"} rows={2} maxLength={4000} aria-describedby="composer-hint" />
+            <div className="composer-toolbar">
+              <div className="toolbar-left">
+                <label className="tool-button" title="上传参考图"><Paperclip size={17} /><input type="file" accept="image/*" multiple onChange={(event) => { addReferenceFiles(event.target.files); event.currentTarget.value = "" }} /></label>
+                <div className="parameter-menu"><button type="button" className="parameter-trigger" onClick={() => setParametersOpen(!parametersOpen)}>{currentSize.ratio} · {count} 张 <ChevronDown size={14} /></button>
+                  {parametersOpen && <div className="parameter-popover"><strong>生成参数</strong><label>图片比例</label><div className="ratio-list">{SIZE_OPTIONS.map((option) => <button type="button" className={size === option.value ? "selected" : ""} key={option.value} onClick={() => setSize(option.value)}><span className={`ratio-icon ${option.label}`} /> <b>{option.label} {option.ratio}</b><small>{option.pixels}</small></button>)}</div><label>生成数量 <b>{count} / 10</b></label><input type="range" min="1" max="10" value={count} onChange={(event) => setCount(Number(event.target.value))} /></div>}
+                </div>
+              </div>
+              <div className="toolbar-right"><span className={`prompt-count ${prompt.length >= 3600 ? "near-limit" : ""}`}>{prompt.length.toLocaleString()} / 4,000</span><button className="send-button" disabled={!prompt.trim() || submitting} aria-label="发送"><Send size={18} /></button></div>
             </div>
-          </div>
-          {error && <div className="error-box">{error}</div>}
-          {images.length > 0 ? (
-            <div className={`result-grid ${images.length > 1 ? "multiple" : ""}`}>{images.map((url, index) => (
-              <figure key={url}><img src={url} alt={`生成结果 ${index + 1}`} />
-                <a href={url} download={`maolao-${task?.task_id}-${index + 1}.png`}>下载原图</a></figure>
-            ))}</div>
-          ) : (
-            <div className={`empty-result ${busy ? "working" : ""}`}>
-              {busy ? <LoaderCircle className="spin" size={38} /> : <ImagePlus size={42} />}
-              <strong>{busy ? "AI 正在绘制你的画面" : "等待你的创意"}</strong>
-              <span>{busy ? `任务状态：${task?.status || "提交中"}` : "生成完成后，图片会展示在这里"}</span>
-            </div>
-          )}
-        </aside>
-      </section>
-      <footer>API Key 仅保存在服务端 · 图片结果默认由上游保留约 1 小时</footer>
-    </main>
+          </form>
+          <small id="composer-hint" className="composer-note">Enter 发送，Shift + Enter 换行。生成内容和参考图保存在本机。</small>
+        </div>
+      </main>
+      {modal && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !modalBusy) setModal(null) }}>
+        {modal.type === "delete" ? <section className="site-modal" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title">
+          <button className="modal-close" onClick={() => setModal(null)} disabled={modalBusy} aria-label="关闭"><X size={18} /></button>
+          <div className="modal-icon danger"><Trash2 size={20} /></div>
+          <h2 id="delete-modal-title">删除对话？</h2>
+          <p>“{modal.title}”及其中所有聊天和图片记录将被永久删除，此操作不可恢复。</p>
+          <div className="modal-actions"><button className="secondary" onClick={() => setModal(null)} disabled={modalBusy}>取消</button><button className="danger" onClick={confirmDeleteConversation} disabled={modalBusy}>{modalBusy ? "删除中…" : "确认删除"}</button></div>
+        </section> : <form className="site-modal" role="dialog" aria-modal="true" aria-labelledby="rename-modal-title" onSubmit={submitRename}>
+          <button type="button" className="modal-close" onClick={() => setModal(null)} disabled={modalBusy} aria-label="关闭"><X size={18} /></button>
+          <div className="modal-icon"><Pencil size={20} /></div>
+          <h2 id="rename-modal-title">重命名对话</h2>
+          <p>输入一个便于识别的名称。</p>
+          <input autoFocus value={renameTitle} onChange={(event) => setRenameTitle(event.target.value)} maxLength={100} placeholder="对话名称" />
+          <div className="modal-actions"><button type="button" className="secondary" onClick={() => setModal(null)} disabled={modalBusy}>取消</button><button type="submit" disabled={!renameTitle.trim() || modalBusy}>{modalBusy ? "保存中…" : "保存"}</button></div>
+        </form>}
+      </div>}
+    </div>
   )
 }

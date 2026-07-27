@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.routes import images
+from app.api.routes import conversations
 
 api_router = APIRouter()
-api_router.include_router(images.router)
+api_router.include_router(conversations.router)
