@@ -78,7 +78,20 @@ def init_database() -> None:
                 file_name TEXT NOT NULL,
                 stored_name TEXT NOT NULL,
                 mime_type TEXT NOT NULL,
+                storage_backend TEXT NOT NULL DEFAULT 'local',
+                storage_status TEXT NOT NULL DEFAULT 'ready',
+                object_key TEXT,
+                preview_key TEXT,
+                thumbnail_key TEXT,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS pending_storage_deletions (
+                id TEXT PRIMARY KEY,
+                object_key TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_turns_conversation
@@ -87,6 +100,22 @@ def init_database() -> None:
                 ON images(turn_id, position);
             """
         )
+        image_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(images)").fetchall()
+        }
+        migrations = {
+            "storage_backend": "TEXT NOT NULL DEFAULT 'local'",
+            "storage_status": "TEXT NOT NULL DEFAULT 'ready'",
+            "object_key": "TEXT",
+            "preview_key": "TEXT",
+            "thumbnail_key": "TEXT",
+        }
+        for column, declaration in migrations.items():
+            if column not in image_columns:
+                connection.execute(
+                    f"ALTER TABLE images ADD COLUMN {column} {declaration}"
+                )  # noqa: S608
 
 
 def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
