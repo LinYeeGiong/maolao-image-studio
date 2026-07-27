@@ -1,7 +1,17 @@
+import asyncio
 from io import BytesIO
 from typing import get_args
 
-from app.api.routes.images import ImageSize, build_maolao_request
+import httpx
+import pytest
+
+from app.api.routes.images import (
+    ImageSize,
+    build_image_download_request,
+    build_maolao_request,
+    download_generated_image,
+    exception_message,
+)
 
 
 def test_square_size_uses_valid_maximum_pixel_budget() -> None:
@@ -57,7 +67,9 @@ def test_builds_multipart_edit_request_with_reference_image() -> None:
     assert request.files[0][1][0] == "reference.png"
 
 
-def test_builds_multipart_request_with_repeated_image_field_for_multiple_images() -> None:
+def test_builds_multipart_request_with_repeated_image_field_for_multiple_images() -> (
+    None
+):
     references = [
         ("first.png", BytesIO(b"first"), "image/png"),
         ("second.webp", BytesIO(b"second"), "image/webp"),
@@ -74,3 +86,279 @@ def test_builds_multipart_request_with_repeated_image_field_for_multiple_images(
     assert request.files is not None
     assert [field for field, _ in request.files] == ["image", "image"]
     assert [upload[0] for _, upload in request.files] == ["first.png", "second.webp"]
+
+
+def test_uses_absolute_https_result_url_without_api_authorization() -> None:
+    request = build_image_download_request(
+        result_item={"url": "https://example-bucket.s3.amazonaws.com/result.png"},
+        upstream_task_id="task-1",
+        index=0,
+        base_url="https://maolaoapi.com",
+        api_headers={"Authorization": "Bearer secret"},
+    )
+
+    assert request.url == "https://example-bucket.s3.amazonaws.com/result.png"
+    assert request.headers is None
+
+
+def test_authenticates_absolute_result_url_on_maolao_origin() -> None:
+    headers = {"Authorization": "Bearer secret"}
+
+    request = build_image_download_request(
+        result_item={"url": "https://maolaoapi.com/v1/images/tasks/task-1/content/0"},
+        upstream_task_id="task-1",
+        index=0,
+        base_url="https://maolaoapi.com",
+        api_headers=headers,
+    )
+
+    assert request.headers == headers
+
+
+def test_resolves_relative_result_url_with_api_authorization() -> None:
+    headers = {"Authorization": "Bearer secret"}
+
+    request = build_image_download_request(
+        result_item={"url": "/v1/images/tasks/task-1/content/0"},
+        upstream_task_id="task-1",
+        index=0,
+        base_url="https://maolaoapi.com",
+        api_headers=headers,
+    )
+
+    assert request.url == "https://maolaoapi.com/v1/images/tasks/task-1/content/0"
+    assert request.headers == headers
+
+
+def test_falls_back_to_content_endpoint_when_result_url_is_missing() -> None:
+    headers = {"Authorization": "Bearer secret"}
+
+    request = build_image_download_request(
+        result_item={},
+        upstream_task_id="task/with slash",
+        index=2,
+        base_url="https://maolaoapi.com",
+        api_headers=headers,
+    )
+
+    assert (
+        request.url
+        == "https://maolaoapi.com/v1/images/tasks/task%2Fwith%20slash/content/2"
+    )
+    assert request.headers == headers
+
+
+def test_rejects_insecure_absolute_result_url() -> None:
+    with pytest.raises(ValueError, match="HTTPS"):
+        build_image_download_request(
+            result_item={"url": "http://external.example/result.png"},
+            upstream_task_id="task-1",
+            index=0,
+            base_url="https://maolaoapi.com",
+            api_headers={"Authorization": "Bearer secret"},
+        )
+
+
+def test_rejects_untrusted_absolute_result_host() -> None:
+    with pytest.raises(ValueError, match="trusted"):
+        build_image_download_request(
+            result_item={"url": "https://127.0.0.1/internal"},
+            upstream_task_id="task-1",
+            index=0,
+            base_url="https://maolaoapi.com",
+            api_headers={"Authorization": "Bearer secret"},
+        )
+
+
+def test_retries_temporary_download_failure_then_returns_image() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(404, json={"error": "not ready"}, request=request)
+        assert "authorization" not in request.headers
+        return httpx.Response(
+            200,
+            content=b"\x89PNG\r\n\x1a\npng-data",
+            headers={"content-type": "image/png"},
+            request=request,
+        )
+
+    async def run() -> httpx.Response:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            request = build_image_download_request(
+                result_item={
+                    "url": "https://example-bucket.s3.amazonaws.com/result.png"
+                },
+                upstream_task_id="task-1",
+                index=0,
+                base_url="https://maolaoapi.com",
+                api_headers={"Authorization": "Bearer secret"},
+            )
+            return await download_generated_image(
+                client,
+                request,
+                attempts=3,
+                retry_delay_seconds=0,
+            )
+
+    response = asyncio.run(run())
+
+    assert response.content == b"\x89PNG\r\n\x1a\npng-data"
+    assert attempts == 2
+
+
+def test_does_not_retry_permanent_download_failure() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            400,
+            json={"error": {"message": "invalid result URL"}},
+            request=request,
+        )
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            request = build_image_download_request(
+                result_item={
+                    "url": "https://example-bucket.s3.amazonaws.com/result.png"
+                },
+                upstream_task_id="task-1",
+                index=0,
+                base_url="https://maolaoapi.com",
+                api_headers={"Authorization": "Bearer secret"},
+            )
+            await download_generated_image(
+                client,
+                request,
+                attempts=3,
+                retry_delay_seconds=0,
+            )
+
+    with pytest.raises(RuntimeError, match="invalid result URL"):
+        asyncio.run(run())
+
+    assert attempts == 1
+
+
+def test_rejects_successful_non_image_download() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b"<html>not an image</html>",
+            headers={"content-type": "text/html"},
+            request=request,
+        )
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            request = build_image_download_request(
+                result_item={
+                    "url": "https://example-bucket.s3.amazonaws.com/result.png"
+                },
+                upstream_task_id="task-1",
+                index=0,
+                base_url="https://maolaoapi.com",
+                api_headers={"Authorization": "Bearer secret"},
+            )
+            await download_generated_image(client, request, retry_delay_seconds=0)
+
+    with pytest.raises(RuntimeError, match="image content type"):
+        asyncio.run(run())
+
+
+def test_rejects_download_larger_than_limit() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b"\x89PNG\r\n\x1a\nlarge",
+            headers={"content-type": "image/png", "content-length": "13"},
+            request=request,
+        )
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            request = build_image_download_request(
+                result_item={
+                    "url": "https://example-bucket.s3.amazonaws.com/result.png"
+                },
+                upstream_task_id="task-1",
+                index=0,
+                base_url="https://maolaoapi.com",
+                api_headers={"Authorization": "Bearer secret"},
+            )
+            await download_generated_image(
+                client,
+                request,
+                retry_delay_seconds=0,
+                max_bytes=12,
+            )
+
+    with pytest.raises(RuntimeError, match="size limit"):
+        asyncio.run(run())
+
+
+def test_does_not_retry_nonstandard_600_status() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(600, text="nonstandard", request=request)
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            request = build_image_download_request(
+                result_item={},
+                upstream_task_id="task-1",
+                index=0,
+                base_url="https://maolaoapi.com",
+                api_headers={"Authorization": "Bearer secret"},
+            )
+            await download_generated_image(
+                client,
+                request,
+                attempts=3,
+                retry_delay_seconds=0,
+            )
+
+    with pytest.raises(RuntimeError, match="nonstandard"):
+        asyncio.run(run())
+
+    assert attempts == 1
+
+
+def test_limits_error_response_body_before_reporting_failure() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, content=b"0123456789", request=request)
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            request = build_image_download_request(
+                result_item={},
+                upstream_task_id="task-1",
+                index=0,
+                base_url="https://maolaoapi.com",
+                api_headers={"Authorization": "Bearer secret"},
+            )
+            await download_generated_image(
+                client,
+                request,
+                retry_delay_seconds=0,
+                max_error_bytes=8,
+            )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(run())
+
+    assert "01234567" in str(exc_info.value)
+    assert "0123456789" not in str(exc_info.value)
+
+
+def test_formats_empty_exception_with_class_name() -> None:
+    assert exception_message(httpx.ReadTimeout("")) == "ReadTimeout"
