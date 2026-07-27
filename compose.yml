@@ -45,6 +45,7 @@ services:
     volumes:
       - maolao_data:/data
     dns:
+    - 127.0.0.11
     - 1.1.1.1
     - 8.8.8.8
     depends_on:
@@ -81,6 +82,10 @@ services:
       COS_OBJECT_PREFIX: ${COS_OBJECT_PREFIX:-maolao}
     volumes:
       - maolao_data:/data
+    dns:
+    - 127.0.0.11
+    - 1.1.1.1
+    - 8.8.8.8
     depends_on:
       redis:
         condition: service_healthy
