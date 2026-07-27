@@ -13,7 +13,8 @@ from uuid import uuid4
 import httpx
 from fastapi import HTTPException
 
-from app.core.database import connect, media_dir, now_iso, row_dict
+from app.core.database import connect, now_iso, row_dict
+from app.core.image_storage import discard_stored_image, read_original, store_image
 from app.core.settings import settings
 
 ImageSize = Literal["2880x2880", "3840x2160", "2160x3840"]
@@ -224,11 +225,11 @@ def _references_for_turn(turn: dict[str, Any]) -> list[tuple[str, BytesIO, str]]
         rows = []
         if turn.get("source_image_id"):
             rows += connection.execute(
-                "SELECT file_name, stored_name, mime_type FROM images WHERE id = ?",
+                "SELECT * FROM images WHERE id = ?",
                 (turn["source_image_id"],),
             ).fetchall()
         rows += connection.execute(
-            """SELECT file_name, stored_name, mime_type FROM images
+            """SELECT * FROM images
                WHERE turn_id = ? AND kind = 'reference'
                ORDER BY position ASC""",
             (turn["id"],),
@@ -236,7 +237,7 @@ def _references_for_turn(turn: dict[str, Any]) -> list[tuple[str, BytesIO, str]]
     return [
         (
             row["file_name"],
-            BytesIO((media_dir() / row["stored_name"]).read_bytes()),
+            BytesIO(read_original(dict(row))),
             row["mime_type"],
         )
         for row in rows
@@ -270,21 +271,46 @@ def _save_generated_image(
     if extension == ".jpe":
         extension = ".jpg"
     image_id = str(uuid4())
-    stored_name = f"{turn_id}-{position}-{image_id}{extension}"
-    (media_dir() / stored_name).write_bytes(content)
     with connect() as connection:
-        connection.execute(
-            "INSERT INTO images (id, turn_id, kind, position, file_name, stored_name, mime_type, created_at) VALUES (?, ?, 'generated', ?, ?, ?, ?, ?)",
-            (
-                image_id,
-                turn_id,
-                position,
-                f"maolao-{position + 1}{extension}",
-                stored_name,
-                media_type,
-                now_iso(),
-            ),
-        )
+        turn = connection.execute(
+            "SELECT conversation_id FROM turns WHERE id = ?", (turn_id,)
+        ).fetchone()
+    if turn is None:
+        raise RuntimeError("生成任务不存在")
+    stored = store_image(
+        conversation_id=turn["conversation_id"],
+        turn_id=turn_id,
+        image_id=image_id,
+        extension=extension,
+        mime_type=media_type,
+        content=content,
+    )
+    try:
+        with connect() as connection:
+            connection.execute(
+                """INSERT INTO images
+                   (id, turn_id, kind, position, file_name, stored_name, mime_type,
+                    storage_backend, storage_status, object_key, preview_key,
+                    thumbnail_key, created_at)
+                   VALUES (?, ?, 'generated', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    image_id,
+                    turn_id,
+                    position,
+                    f"maolao-{position + 1}{extension}",
+                    stored.stored_name,
+                    media_type,
+                    stored.storage_backend,
+                    stored.storage_status,
+                    stored.object_key,
+                    stored.preview_key,
+                    stored.thumbnail_key,
+                    now_iso(),
+                ),
+            )
+    except Exception:
+        discard_stored_image(stored)
+        raise
 
 
 async def process_turn(turn_id: str) -> None:
@@ -348,7 +374,8 @@ async def process_turn(turn_id: str) -> None:
                     api_headers=_headers(),
                 )
                 response = await download_generated_image(client, download_request)
-                _save_generated_image(
+                await asyncio.to_thread(
+                    _save_generated_image,
                     turn_id=turn_id,
                     position=index,
                     content=response.content,

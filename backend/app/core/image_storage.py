@@ -327,6 +327,23 @@ def queue_storage_deletions(object_keys: list[str]) -> None:
                 )
 
 
+def discard_stored_image(stored: StoredImage) -> None:
+    if stored.object_key:
+        queue_storage_deletions(
+            [
+                key
+                for key in (
+                    stored.object_key,
+                    stored.preview_key,
+                    stored.thumbnail_key,
+                )
+                if key
+            ]
+        )
+        retry_pending_deletions_once()
+    _remove_local_variants(stored.stored_name)
+
+
 def retry_pending_deletions_once(client: Any | None = None) -> int:
     if not cos_is_configured():
         return 0

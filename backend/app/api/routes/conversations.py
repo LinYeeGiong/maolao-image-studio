@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import mimetypes
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,12 @@ from pydantic import BaseModel, Field
 
 from app.api.routes.images import start_turn, validate_size
 from app.core.database import connect, media_dir, now_iso
+from app.core.image_storage import (
+    StoredImage,
+    discard_stored_image,
+    retry_pending_deletions_once,
+    store_image,
+)
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 MAX_REFERENCE_IMAGES = 16
@@ -29,10 +36,14 @@ def validate_reference_count(count: int) -> None:
 
 
 def _image_payload(row: dict[str, Any]) -> dict[str, Any]:
+    base = f"/api/v1/images/{row['id']}"
     return {
         "id": row["id"], "kind": row["kind"], "position": row["position"],
         "file_name": row["file_name"], "mime_type": row["mime_type"],
-        "url": f"/api/v1/media/{row['stored_name']}",
+        "url": f"{base}/preview",
+        "thumbnail_url": f"{base}/thumbnail",
+        "preview_url": f"{base}/preview",
+        "download_url": f"{base}/download",
     }
 
 
@@ -112,13 +123,27 @@ def delete_conversation(conversation_id: str) -> None:
     with connect() as connection:
         _get_conversation(connection, conversation_id)
         files = connection.execute(
-            """SELECT stored_name FROM images WHERE turn_id IN
+            """SELECT stored_name, storage_backend, storage_status,
+                      object_key, preview_key, thumbnail_key
+               FROM images WHERE turn_id IN
                (SELECT id FROM turns WHERE conversation_id = ?)""", (conversation_id,)
         ).fetchall()
+        for item in files:
+            if item["storage_backend"] == "cos" or item["storage_status"] == "pending_upload":
+                for key in (item["object_key"], item["preview_key"], item["thumbnail_key"]):
+                    if key:
+                        connection.execute(
+                            """INSERT OR IGNORE INTO pending_storage_deletions
+                               (id, object_key, created_at) VALUES (?, ?, ?)""",
+                            (str(uuid4()), key, now_iso()),
+                        )
         connection.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
     for item in files:
-        path = media_dir() / item["stored_name"]
-        path.unlink(missing_ok=True)
+        stored_name = item["stored_name"]
+        stem = Path(stored_name).stem
+        for name in (stored_name, f"{stem}-preview.webp", f"{stem}-thumbnail.webp"):
+            (media_dir() / name).unlink(missing_ok=True)
+    retry_pending_deletions_once()
 
 
 def _source_context(connection: Any, conversation_id: str, source_image_id: str | None) -> tuple[str | None, str | None]:
@@ -159,7 +184,7 @@ async def create_turn(
     uploads = ([image] if image is not None else []) + (images or [])
     validate_reference_count(len(uploads))
     pending_references: list[tuple[str, str, str, bytes]] = []
-    stored_references: list[tuple[str, str, str, str]] = []
+    stored_references: list[tuple[str, str, str, StoredImage]] = []
 
     for upload in uploads:
         if not (upload.content_type or "").startswith("image/"):
@@ -171,10 +196,23 @@ async def create_turn(
         extension = Path(upload.filename or "").suffix or mimetypes.guess_extension(mime_type) or ".png"
         pending_references.append((upload.filename or f"reference{extension}", mime_type, extension.lower(), content))
 
-    for position, (file_name, mime_type, extension, content) in enumerate(pending_references):
-        stored_name = f"{turn_id}-reference-{position}-{uuid4()}{extension}"
-        (media_dir() / stored_name).write_bytes(content)
-        stored_references.append((str(uuid4()), file_name, stored_name, mime_type))
+    for file_name, mime_type, extension, content in pending_references:
+        image_id = str(uuid4())
+        try:
+            stored = await asyncio.to_thread(
+                store_image,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                image_id=image_id,
+                extension=extension,
+                mime_type=mime_type,
+                content=content,
+            )
+        except Exception:
+            for stored_reference in stored_references:
+                discard_stored_image(stored_reference[3])
+            raise
+        stored_references.append((image_id, file_name, mime_type, stored))
 
     try:
         with connect() as connection:
@@ -192,12 +230,19 @@ async def create_turn(
                    VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)""",
                 (turn_id, conversation_id, prompt, effective_prompt, selected_size, n, source_id, timestamp),
             )
-            for position, (image_id, file_name, stored_name, mime_type) in enumerate(stored_references):
+            for position, (image_id, file_name, mime_type, stored) in enumerate(stored_references):
                 connection.execute(
                     """INSERT INTO images
-                       (id, turn_id, kind, position, file_name, stored_name, mime_type, created_at)
-                       VALUES (?, ?, 'reference', ?, ?, ?, ?, ?)""",
-                    (image_id, turn_id, position, file_name, stored_name, mime_type, timestamp),
+                       (id, turn_id, kind, position, file_name, stored_name, mime_type,
+                        storage_backend, storage_status, object_key, preview_key,
+                        thumbnail_key, created_at)
+                       VALUES (?, ?, 'reference', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        image_id, turn_id, position, file_name, stored.stored_name,
+                        mime_type, stored.storage_backend, stored.storage_status,
+                        stored.object_key, stored.preview_key, stored.thumbnail_key,
+                        timestamp,
+                    ),
                 )
             title = conversation["title"]
             turn_count = connection.execute("SELECT COUNT(*) FROM turns WHERE conversation_id = ?", (conversation_id,)).fetchone()[0]
@@ -208,7 +253,7 @@ async def create_turn(
             result = _turn_payload(connection, row)
     except Exception:
         for stored_reference in stored_references:
-            (media_dir() / stored_reference[2]).unlink(missing_ok=True)
+            discard_stored_image(stored_reference[3])
         raise
     start_turn(turn_id)
     return result
