@@ -1,5 +1,6 @@
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
@@ -8,14 +9,41 @@ from fastapi.staticfiles import StaticFiles
 from app.api.main import api_router
 from app.api.routes.images import resume_pending_turns
 from app.core.database import init_database, media_dir
+from app.core.image_storage import (
+    retry_pending_deletions_once,
+    retry_pending_uploads_once,
+)
+from app.core.job_queue import reconcile_pending_turns
 from app.core.settings import settings
+
+
+async def run_storage_maintenance_once() -> None:
+    await asyncio.gather(
+        asyncio.to_thread(retry_pending_uploads_once),
+        asyncio.to_thread(retry_pending_deletions_once),
+    )
+
+
+async def storage_maintenance_loop() -> None:
+    while True:
+        await run_storage_maintenance_once()
+        await reconcile_pending_turns()
+        await asyncio.sleep(
+            min(settings.COS_RETRY_INTERVAL_SECONDS, settings.QUEUE_RECONCILE_INTERVAL_SECONDS)
+        )
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     init_database()
-    resume_pending_turns()
-    yield
+    await resume_pending_turns()
+    maintenance = asyncio.create_task(storage_maintenance_loop())
+    try:
+        yield
+    finally:
+        maintenance.cancel()
+        with suppress(asyncio.CancelledError):
+            await maintenance
 
 
 def custom_generate_unique_id(route: APIRoute) -> str:

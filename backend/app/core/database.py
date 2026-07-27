@@ -60,9 +60,13 @@ def init_database() -> None:
                 prompt TEXT NOT NULL,
                 effective_prompt TEXT NOT NULL,
                 size TEXT NOT NULL,
+                quality TEXT NOT NULL DEFAULT 'low',
                 n INTEGER NOT NULL,
                 status TEXT NOT NULL,
                 upstream_task_id TEXT,
+                route_mode TEXT NOT NULL DEFAULT 'auto',
+                selected_provider TEXT,
+                retry_of_turn_id TEXT REFERENCES turns(id),
                 source_image_id TEXT,
                 error TEXT,
                 elapsed_seconds REAL,
@@ -78,6 +82,33 @@ def init_database() -> None:
                 file_name TEXT NOT NULL,
                 stored_name TEXT NOT NULL,
                 mime_type TEXT NOT NULL,
+                storage_backend TEXT NOT NULL DEFAULT 'local',
+                storage_status TEXT NOT NULL DEFAULT 'ready',
+                object_key TEXT,
+                preview_key TEXT,
+                thumbnail_key TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS pending_storage_deletions (
+                id TEXT PRIMARY KEY,
+                object_key TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS provider_attempts (
+                id TEXT PRIMARY KEY,
+                turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+                provider TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                error_kind TEXT,
+                error_message TEXT,
+                external_task_id TEXT,
+                submitted_at TEXT,
+                completed_at TEXT,
                 created_at TEXT NOT NULL
             );
 
@@ -85,8 +116,41 @@ def init_database() -> None:
                 ON turns(conversation_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_images_turn
                 ON images(turn_id, position);
+            CREATE INDEX IF NOT EXISTS idx_provider_attempts_turn
+                ON provider_attempts(turn_id, position);
             """
         )
+        image_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(images)").fetchall()
+        }
+        migrations = {
+            "storage_backend": "TEXT NOT NULL DEFAULT 'local'",
+            "storage_status": "TEXT NOT NULL DEFAULT 'ready'",
+            "object_key": "TEXT",
+            "preview_key": "TEXT",
+            "thumbnail_key": "TEXT",
+        }
+        for column, declaration in migrations.items():
+            if column not in image_columns:
+                connection.execute(
+                    f"ALTER TABLE images ADD COLUMN {column} {declaration}"
+                )  # noqa: S608
+        turn_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(turns)").fetchall()
+        }
+        turn_migrations = {
+            "quality": "TEXT NOT NULL DEFAULT 'low'",
+            "route_mode": "TEXT NOT NULL DEFAULT 'auto'",
+            "selected_provider": "TEXT",
+            "retry_of_turn_id": "TEXT",
+        }
+        for column, declaration in turn_migrations.items():
+            if column not in turn_columns:
+                connection.execute(
+                    f"ALTER TABLE turns ADD COLUMN {column} {declaration}"
+                )  # noqa: S608
 
 
 def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
