@@ -2,7 +2,7 @@ import { RotateCcw } from "lucide-react"
 import { useState } from "react"
 
 type OptimizedImageProps = {
-  src: string
+  src?: string
   alt: string
   className?: string
   loading?: "eager" | "lazy"
@@ -18,23 +18,25 @@ export default function OptimizedImage({
 }: OptimizedImageProps) {
   const [attempt, setAttempt] = useState(0)
   const [status, setStatus] = useState<"loading" | "loaded" | "error">("loading")
-  const separator = src.includes("?") ? "&" : "?"
-  const retrySrc = attempt ? `${src}${separator}retry=${attempt}` : src
+  const separator = src?.includes("?") ? "&" : "?"
+  const retrySrc = src && attempt ? `${src}${separator}retry=${attempt}` : src
 
   return (
     <span
       className={`optimized-image ${status} ${className}`.trim()}
       style={aspectRatio ? { aspectRatio } : undefined}
     >
-      <img
-        key={retrySrc}
-        src={retrySrc}
-        alt={alt}
-        loading={loading}
-        decoding="async"
-        onLoad={() => setStatus("loaded")}
-        onError={() => setStatus("error")}
-      />
+      {retrySrc && (
+        <img
+          key={retrySrc}
+          src={retrySrc}
+          alt={alt}
+          loading={loading}
+          decoding="async"
+          onLoad={() => setStatus("loaded")}
+          onError={() => setStatus("error")}
+        />
+      )}
       {status === "error" && (
         <button
           type="button"
