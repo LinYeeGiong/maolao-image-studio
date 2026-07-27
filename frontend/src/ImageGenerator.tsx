@@ -3,6 +3,7 @@ import {
   Paperclip, Pencil, Plus, Search, Send, Sparkles, Trash2, X,
 } from "lucide-react"
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react"
+import OptimizedImage from "./OptimizedImage"
 
 const API_BASE = import.meta.env.VITE_API_URL || ""
 const MAX_REFERENCE_IMAGES = 16
@@ -13,7 +14,10 @@ const SIZE_OPTIONS = [
 ] as const
 type ImageSize = (typeof SIZE_OPTIONS)[number]["value"]
 
-type StudioImage = { id: string; kind: "reference" | "generated"; position: number; file_name: string; mime_type: string; url: string }
+type StudioImage = {
+  id: string; kind: "reference" | "generated"; position: number; file_name: string; mime_type: string; url: string
+  thumbnail_url?: string; preview_url?: string; download_url?: string
+}
 type Turn = {
   id: string; prompt: string; size: ImageSize; n: number; status: "queued" | "processing" | "succeeded" | "failed"
   source_image_id?: string | null; error?: string | null; elapsed_seconds?: number | null; created_at: string; images: StudioImage[]
@@ -35,6 +39,19 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 function mediaUrl(url: string) { return url.startsWith("http") ? url : `${API_BASE}${url}` }
+function imageVariant(image: StudioImage, variant: "thumbnail" | "preview" | "download") {
+  const selected = variant === "thumbnail"
+    ? image.thumbnail_url
+    : variant === "preview"
+      ? image.preview_url
+      : image.download_url
+  return mediaUrl(selected || image.url)
+}
+function aspectRatio(size: ImageSize) {
+  if (size === "3840x2160") return "16 / 9"
+  if (size === "2160x3840") return "9 / 16"
+  return "1 / 1"
+}
 function formatDate(value: string) {
   const date = new Date(value)
   const today = new Date()
@@ -247,7 +264,7 @@ export default function ImageGenerator() {
             return <article className="turn" key={turn.id}>
               <div className="user-message">
                 {uploaded.length > 0 && <div className={`user-reference-grid count-${Math.min(uploaded.length, 4)}`}>
-                  {uploaded.map((image, index) => <img key={image.id} src={mediaUrl(image.url)} alt={`上传的参考图 ${index + 1}`} />)}
+                  {uploaded.map((image, index) => <OptimizedImage key={image.id} className="reference-preview" src={imageVariant(image, "thumbnail")} alt={`上传的参考图 ${index + 1}`} aspectRatio={aspectRatio(turn.size)} />)}
                 </div>}
                 {turn.source_image_id && <span className="context-tag"><ImagePlus size={13} /> 基于上一张图继续优化</span>}
                 <p>{turn.prompt}</p><small>{SIZE_OPTIONS.find((item) => item.value === turn.size)?.ratio} / {turn.size} / {turn.n} 张</small>
@@ -256,8 +273,8 @@ export default function ImageGenerator() {
                 <div className="assistant-head"><span><Sparkles size={15} /> Maolao</span><em><Clock3 size={13} /> {elapsed.toFixed(1)} 秒</em></div>
                 {turn.status === "failed" ? <div className="turn-error">生成失败：{turn.error}</div> : generated.length ?
                   <div className={`image-grid count-${Math.min(generated.length, 4)}`}>{generated.map((image) => <figure key={image.id}>
-                    <img src={mediaUrl(image.url)} alt={`生成结果 ${image.position + 1}`} loading="lazy" />
-                    <div className="image-actions"><button onClick={() => chooseSource(image, turn)}><Check size={14} /> 以此图继续优化</button><a href={mediaUrl(image.url)} download={image.file_name}><Download size={14} /></a></div>
+                    <OptimizedImage className="generated-preview" src={imageVariant(image, "preview")} alt={`生成结果 ${image.position + 1}`} aspectRatio={aspectRatio(turn.size)} />
+                    <div className="image-actions"><button onClick={() => chooseSource(image, turn)}><Check size={14} /> 以此图继续优化</button><a href={imageVariant(image, "download")} download={image.file_name}><Download size={14} /></a></div>
                   </figure>)}</div> : <div className="generating-card"><span className="loader" /><div><strong>正在生成 {turn.n} 张 4K 图片</strong><small>{turn.status === "queued" ? "任务排队中" : "AI 正在绘制，请稍候"}</small></div></div>}
               </div>
             </article>
@@ -273,12 +290,12 @@ export default function ImageGenerator() {
             )}
             <div className="selected-images-row">
               {sourceImage && <div className="selected-chip">
-                <img src={mediaUrl(sourceImage.url)} alt="已选择生成图" />
+                <OptimizedImage src={imageVariant(sourceImage, "thumbnail")} alt="已选择生成图" loading="eager" />
                 <span><strong>已选择生成图</strong><small>将在此图基础上继续优化</small></span>
                 <button type="button" onClick={() => setSourceImage(null)} aria-label="移除生成图"><X size={14} /></button>
               </div>}
               {files.map((file, index) => <div className="selected-chip" key={`${file.name}-${file.lastModified}-${index}`}>
-                <img src={previews[index]} alt={`参考图 ${index + 1}`} />
+                <OptimizedImage src={previews[index]} alt={`参考图 ${index + 1}`} loading="eager" />
                 <span><strong>参考图 {index + 1}</strong><small>{file.name}</small></span>
                 <button type="button" onClick={() => setFiles(files.filter((_, itemIndex) => itemIndex !== index))} aria-label={`移除参考图 ${index + 1}`}><X size={14} /></button>
               </div>)}
@@ -298,7 +315,7 @@ export default function ImageGenerator() {
               <div className="toolbar-right"><span className={`prompt-count ${prompt.length >= 3600 ? "near-limit" : ""}`}>{prompt.length.toLocaleString()} / 4,000</span><button className="send-button" disabled={!prompt.trim() || submitting} aria-label="发送"><Send size={18} /></button></div>
             </div>
           </form>
-          <small id="composer-hint" className="composer-note">Enter 发送，Shift + Enter 换行。生成内容和参考图保存在本机。</small>
+          <small id="composer-hint" className="composer-note">Enter 发送，Shift + Enter 换行。新图片使用私有云存储，历史图片继续兼容。</small>
         </div>
       </main>
       {modal && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !modalBusy) setModal(null) }}>
