@@ -70,6 +70,48 @@ def test_reference_upload_persists_cos_storage_metadata(tmp_path, monkeypatch) -
     assert row["object_key"].endswith("/original.png")
 
 
+def test_text_only_turn_does_not_inherit_latest_generated_image(tmp_path, monkeypatch) -> None:
+    seed_conversation(tmp_path, monkeypatch)
+    timestamp = now_iso()
+    with connect() as connection:
+        connection.execute(
+            """INSERT INTO turns
+               (id, conversation_id, prompt, effective_prompt, size, n, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("turn-previous", "conversation-1", "old", "old", "2880x2880", 1,
+             "succeeded", timestamp),
+        )
+        connection.execute(
+            """INSERT INTO images
+               (id, turn_id, kind, position, file_name, stored_name, mime_type, created_at)
+               VALUES (?, ?, 'generated', 0, ?, ?, 'image/png', ?)""",
+            ("image-previous", "turn-previous", "previous.png", "previous.png", timestamp),
+        )
+    monkeypatch.setattr(conversations, "start_turn", lambda _: None)
+
+    created = asyncio.run(
+        conversations.create_turn(
+            conversation_id="conversation-1",
+            prompt="new text-only request",
+            size="2160x3840",
+            n=1,
+            source_image_id=None,
+            image=None,
+            images=[],
+        )
+    )
+
+    assert created["source_image_id"] is None
+    assert created["quality"] == "low"
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT source_image_id, effective_prompt FROM turns WHERE id = ?",
+            (created["id"],),
+        ).fetchone()
+    assert row["source_image_id"] is None
+    assert row["effective_prompt"] == "new text-only request"
+
+
 def test_generated_result_persists_cos_storage_metadata(tmp_path, monkeypatch) -> None:
     seed_conversation(tmp_path, monkeypatch)
     with connect() as connection:

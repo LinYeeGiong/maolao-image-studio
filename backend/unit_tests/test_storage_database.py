@@ -55,6 +55,12 @@ def test_upgrades_legacy_images_table_without_losing_rows(
         "SELECT name FROM sqlite_master "
         "WHERE type = 'table' AND name = 'pending_storage_deletions'"
     ).fetchone()
+    turn_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(turns)")
+    }
+    attempts_table = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'provider_attempts'"
+    ).fetchone()
     connection.close()
 
     assert {
@@ -69,3 +75,5 @@ def test_upgrades_legacy_images_table_without_losing_rows(
     assert row["storage_backend"] == "local"
     assert row["storage_status"] == "ready"
     assert deletion_table is not None
+    assert {"route_mode", "selected_provider", "retry_of_turn_id"} <= turn_columns
+    assert attempts_table is not None

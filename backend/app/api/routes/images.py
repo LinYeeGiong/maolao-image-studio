@@ -18,6 +18,7 @@ from app.core.image_storage import discard_stored_image, read_original, store_im
 from app.core.settings import settings
 
 ImageSize = Literal["2880x2880", "3840x2160", "2160x3840"]
+ImageQuality = Literal["low", "high"]
 ALLOWED_SIZES = {"2880x2880", "3840x2160", "2160x3840"}
 MAX_GENERATED_IMAGE_BYTES = 50 * 1024 * 1024
 MAX_ERROR_RESPONSE_BYTES = 64 * 1024
@@ -48,13 +49,14 @@ def build_maolao_request(
     prompt: str,
     size: ImageSize,
     n: int,
+    quality: ImageQuality,
     reference_images: list[tuple[str, BytesIO, str]],
 ) -> MaolaoRequest:
     common = {
-        "model": "gpt-image-2-4k",
+        "model": settings.MAOLAO_IMAGE_MODEL,
         "prompt": prompt,
         "n": n,
-        "quality": "high",
+        "quality": quality,
         "response_format": "b64_json",
         "size": size,
     }
@@ -405,17 +407,17 @@ async def process_turn(turn_id: str) -> None:
                 )
 
 
-def start_turn(turn_id: str) -> None:
-    asyncio.create_task(process_turn(turn_id))
+def start_turn(turn_id: str):
+    """Return a queueing coroutine; kept here for route compatibility."""
+    from app.core.job_queue import enqueue_turn
+
+    return enqueue_turn(turn_id)
 
 
-def resume_pending_turns() -> None:
-    with connect() as connection:
-        rows = connection.execute(
-            "SELECT id FROM turns WHERE status IN ('queued', 'processing')"
-        ).fetchall()
-    for row in rows:
-        start_turn(row["id"])
+async def resume_pending_turns() -> None:
+    from app.core.job_queue import reconcile_pending_turns
+
+    await reconcile_pending_turns()
 
 
 def validate_size(size: str) -> ImageSize:

@@ -13,6 +13,7 @@ from app.core.image_storage import (
     retry_pending_deletions_once,
     retry_pending_uploads_once,
 )
+from app.core.job_queue import reconcile_pending_turns
 from app.core.settings import settings
 
 
@@ -26,13 +27,16 @@ async def run_storage_maintenance_once() -> None:
 async def storage_maintenance_loop() -> None:
     while True:
         await run_storage_maintenance_once()
-        await asyncio.sleep(settings.COS_RETRY_INTERVAL_SECONDS)
+        await reconcile_pending_turns()
+        await asyncio.sleep(
+            min(settings.COS_RETRY_INTERVAL_SECONDS, settings.QUEUE_RECONCILE_INTERVAL_SECONDS)
+        )
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     init_database()
-    resume_pending_turns()
+    await resume_pending_turns()
     maintenance = asyncio.create_task(storage_maintenance_loop())
     try:
         yield

@@ -13,14 +13,24 @@ const SIZE_OPTIONS = [
   { value: "2160x3840", label: "竖屏", ratio: "9:16", pixels: "2160 × 3840" },
 ] as const
 type ImageSize = (typeof SIZE_OPTIONS)[number]["value"]
+type ImageQuality = "low" | "high"
+type Provider = "maolao" | "relayrouter" | "openai"
+type RouteSelection = "auto" | Provider
+const ROUTE_OPTIONS: { value: RouteSelection; label: string }[] = [
+  { value: "auto", label: "自动选择模型" },
+  { value: "maolao", label: "Maolao" },
+  { value: "relayrouter", label: "RelayRouter" },
+  { value: "openai", label: "OpenAI 官方" },
+]
 
 type StudioImage = {
   id: string; kind: "reference" | "generated"; position: number; file_name: string; mime_type: string; url: string
   thumbnail_url?: string; preview_url?: string; download_url?: string
 }
 type Turn = {
-  id: string; prompt: string; size: ImageSize; n: number; status: "queued" | "processing" | "succeeded" | "failed"
+  id: string; prompt: string; size: ImageSize; quality?: ImageQuality; n: number; status: "queued" | "processing" | "succeeded" | "partially_succeeded" | "failed" | "needs_attention"
   source_image_id?: string | null; error?: string | null; elapsed_seconds?: number | null; created_at: string; images: StudioImage[]
+  provider_attempts?: { provider: Provider; position: number; status: string; error_message?: string | null }[]
 }
 type Conversation = { id: string; title: string; updated_at: string; turn_count: number; last_status?: string | null; turns?: Turn[] }
 type ModalState =
@@ -65,8 +75,11 @@ export default function ImageGenerator() {
   const [activeId, setActiveId] = useState<string | null>(null)
   const [conversation, setConversation] = useState<Conversation | null>(null)
   const [prompt, setPrompt] = useState("")
-  const [size, setSize] = useState<ImageSize>("2880x2880")
+  const [size, setSize] = useState<ImageSize>("2160x3840")
+  const [quality, setQuality] = useState<ImageQuality>("low")
   const [count, setCount] = useState(1)
+  const [route, setRoute] = useState<RouteSelection>("auto")
+  const [retryOfTurnId, setRetryOfTurnId] = useState<string | null>(null)
   const [files, setFiles] = useState<File[]>([])
   const [sourceImage, setSourceImage] = useState<StudioImage | null>(null)
   const [previews, setPreviews] = useState<string[]>([])
@@ -77,10 +90,13 @@ export default function ImageGenerator() {
   const [renameTitle, setRenameTitle] = useState("")
   const [modalBusy, setModalBusy] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [routeOpen, setRouteOpen] = useState(false)
   const [parametersOpen, setParametersOpen] = useState(false)
   const [now, setNow] = useState(Date.now())
   const bottomRef = useRef<HTMLDivElement>(null)
   const promptRef = useRef<HTMLTextAreaElement>(null)
+  const routeMenuRef = useRef<HTMLDivElement>(null)
+  const parameterMenuRef = useRef<HTMLDivElement>(null)
 
   const loadConversations = useCallback(async () => {
     const items = await request<Conversation[]>("/api/v1/conversations")
@@ -94,6 +110,7 @@ export default function ImageGenerator() {
     if (inherit && item.turns?.length) {
       const last = item.turns[item.turns.length - 1]
       setSize(last.size)
+      setQuality(last.quality ?? "low")
       setCount(last.n)
     }
     return item
@@ -140,9 +157,29 @@ export default function ImageGenerator() {
     setPreviews(urls)
     return () => urls.forEach((url) => URL.revokeObjectURL(url))
   }, [files])
+  useEffect(() => {
+    if (!routeOpen && !parametersOpen) return
+    const closeToolbarMenus = (event: MouseEvent) => {
+      if (!routeMenuRef.current?.contains(event.target as Node)) setRouteOpen(false)
+      if (!parameterMenuRef.current?.contains(event.target as Node)) setParametersOpen(false)
+    }
+    const closeToolbarMenusOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setRouteOpen(false)
+        setParametersOpen(false)
+      }
+    }
+    document.addEventListener("mousedown", closeToolbarMenus)
+    document.addEventListener("keydown", closeToolbarMenusOnEscape)
+    return () => {
+      document.removeEventListener("mousedown", closeToolbarMenus)
+      document.removeEventListener("keydown", closeToolbarMenusOnEscape)
+    }
+  }, [routeOpen, parametersOpen])
 
   const filtered = useMemo(() => conversations.filter((item) => item.title.toLowerCase().includes(search.toLowerCase())), [conversations, search])
   const currentSize = SIZE_OPTIONS.find((option) => option.value === size)!
+  const currentRoute = ROUTE_OPTIONS.find((option) => option.value === route)!
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault()
@@ -158,11 +195,14 @@ export default function ImageGenerator() {
         setActiveId(id)
       }
       const form = new FormData()
-      form.append("prompt", prompt.trim()); form.append("size", size); form.append("n", String(count))
+      form.append("prompt", prompt.trim()); form.append("size", size); form.append("quality", quality); form.append("n", String(count))
+      form.append("route_mode", route === "auto" ? "auto" : "manual")
+      if (route !== "auto") form.append("selected_provider", route)
+      if (retryOfTurnId) form.append("retry_of_turn_id", retryOfTurnId)
       if (files.length) files.forEach((file) => form.append("images", file))
       if (sourceImage) form.append("source_image_id", sourceImage.id)
       await request<Turn>(`/api/v1/conversations/${id}/turns`, { method: "POST", body: form })
-      setPrompt(""); setFiles([]); setSourceImage(null)
+      setPrompt(""); setFiles([]); setSourceImage(null); setRetryOfTurnId(null)
       await Promise.all([loadConversation(id), loadConversations()])
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "提交失败")
@@ -227,6 +267,11 @@ export default function ImageGenerator() {
     window.setTimeout(() => document.querySelector<HTMLTextAreaElement>("#prompt")?.focus(), 0)
   }
 
+  function prepareRetry(turn: Turn) {
+    setPrompt(turn.prompt); setSize(turn.size); setQuality(turn.quality ?? "low"); setCount(turn.n); setRetryOfTurnId(turn.id)
+    promptRef.current?.focus()
+  }
+
   return (
     <div className="app-shell">
       <aside className={`sidebar ${sidebarOpen ? "open" : ""}`}>
@@ -271,11 +316,13 @@ export default function ImageGenerator() {
               </div>
               <div className="assistant-message">
                 <div className="assistant-head"><span><Sparkles size={15} /> Maolao</span><em><Clock3 size={13} /> {elapsed.toFixed(1)} 秒</em></div>
-                {turn.status === "failed" ? <div className="turn-error">生成失败：{turn.error}</div> : generated.length ?
+                {turn.provider_attempts?.length ? <details className="provider-attempts"><summary>线路记录</summary>{turn.provider_attempts.map((attempt) => <div key={`${attempt.provider}-${attempt.position}`}><b>{ROUTE_OPTIONS.find((option) => option.value === attempt.provider)?.label}</b><span>{attempt.status}{attempt.error_message ? `：${attempt.error_message}` : ""}</span></div>)}</details> : null}
+                {turn.status === "needs_attention" ? <div className="turn-error">任务状态未知：{turn.error}。<button className="retry-turn" onClick={() => prepareRetry(turn)}>人工重试</button></div> : turn.status === "failed" ? <div className="turn-error">生成失败：{turn.error}</div> : generated.length ?
                   <div className={`image-grid count-${Math.min(generated.length, 4)}`}>{generated.map((image) => <figure key={image.id}>
                     <OptimizedImage className="generated-preview" src={imageVariant(image, "preview")} alt={`生成结果 ${image.position + 1}`} aspectRatio={aspectRatio(turn.size)} />
                     <div className="image-actions"><button onClick={() => chooseSource(image, turn)}><Check size={14} /> 以此图继续优化</button><a href={imageVariant(image, "download")} download={image.file_name}><Download size={14} /></a></div>
                   </figure>)}</div> : <div className="generating-card"><span className="loader" /><div><strong>正在生成 {turn.n} 张 4K 图片</strong><small>{turn.status === "queued" ? "任务排队中" : "AI 正在绘制，请稍候"}</small></div></div>}
+                {turn.status === "partially_succeeded" && <div className="turn-partial">部分完成：{generated.length} / {turn.n} 张图片已保存。</div>}
               </div>
             </article>
           })}
@@ -284,6 +331,7 @@ export default function ImageGenerator() {
 
         <div className="composer-wrap">
           {error && <div className="global-error">{error}<button onClick={() => setError("")}><X size={14} /></button></div>}
+          {retryOfTurnId && <div className="retry-notice">正在人工重试上一条状态未知任务；请选择线路后发送。</div>}
           {(sourceImage || files.length > 0) && <div className="selected-images">
             {files.length + (sourceImage ? 1 : 0) > 1 && (
               <div className="selected-images-head"><span>参考图</span><strong>已选择 {files.length + (sourceImage ? 1 : 0)} / {MAX_REFERENCE_IMAGES}</strong></div>
@@ -308,8 +356,14 @@ export default function ImageGenerator() {
             <div className="composer-toolbar">
               <div className="toolbar-left">
                 <label className="tool-button" title="上传参考图"><Paperclip size={17} /><input type="file" accept="image/*" multiple onChange={(event) => { addReferenceFiles(event.target.files); event.currentTarget.value = "" }} /></label>
-                <div className="parameter-menu"><button type="button" className="parameter-trigger" onClick={() => setParametersOpen(!parametersOpen)}>{currentSize.ratio} · {count} 张 <ChevronDown size={14} /></button>
-                  {parametersOpen && <div className="parameter-popover"><strong>生成参数</strong><label>图片比例</label><div className="ratio-list">{SIZE_OPTIONS.map((option) => <button type="button" className={size === option.value ? "selected" : ""} key={option.value} onClick={() => setSize(option.value)}><span className={`ratio-icon ${option.label}`} /> <b>{option.label} {option.ratio}</b><small>{option.pixels}</small></button>)}</div><label>生成数量 <b>{count} / 10</b></label><input type="range" min="1" max="10" value={count} onChange={(event) => setCount(Number(event.target.value))} /></div>}
+                <div className="route-menu" ref={routeMenuRef}>
+                  <button type="button" className="route-trigger" aria-haspopup="listbox" aria-expanded={routeOpen} onClick={() => { setRouteOpen(!routeOpen); setParametersOpen(false) }}>{currentRoute.label}<ChevronDown size={14} /></button>
+                  {routeOpen && <div className="toolbar-popover route-popover" role="listbox" aria-label="选择生成模型">
+                    {ROUTE_OPTIONS.map((option) => <button type="button" role="option" aria-selected={route === option.value} className={route === option.value ? "selected" : ""} key={option.value} onClick={() => { setRoute(option.value); setRouteOpen(false) }}><span>{option.label}</span>{route === option.value && <Check size={14} />}</button>)}
+                  </div>}
+                </div>
+                <div className="parameter-menu" ref={parameterMenuRef}><button type="button" className="parameter-trigger" aria-haspopup="dialog" aria-expanded={parametersOpen} onClick={() => { setParametersOpen(!parametersOpen); setRouteOpen(false) }}>{currentSize.ratio} · {count} 张 · {quality === "low" ? "低质量" : "高质量"} <ChevronDown size={14} /></button>
+                  {parametersOpen && <div className="toolbar-popover parameter-popover" role="dialog" aria-label="生成参数"><strong>生成参数</strong><label>图片比例</label><div className="ratio-list">{SIZE_OPTIONS.map((option) => <button type="button" className={size === option.value ? "selected" : ""} key={option.value} onClick={() => setSize(option.value)}><span className={`ratio-icon ${option.label}`} /> <b>{option.label} {option.ratio}</b><small>{option.pixels}</small></button>)}</div><label>生成质量</label><div className="quality-list"><button type="button" className={quality === "low" ? "selected" : ""} onClick={() => setQuality("low")}><b>低质量</b><small>更快、更省</small></button><button type="button" className={quality === "high" ? "selected" : ""} onClick={() => setQuality("high")}><b>高质量</b><small>更精细</small></button></div><label>生成数量 <b>{count} / 10</b></label><input type="range" min="1" max="10" value={count} onChange={(event) => setCount(Number(event.target.value))} /></div>}
                 </div>
               </div>
               <div className="toolbar-right"><span className={`prompt-count ${prompt.length >= 3600 ? "near-limit" : ""}`}>{prompt.length.toLocaleString()} / 4,000</span><button className="send-button" disabled={!prompt.trim() || submitting} aria-label="发送"><Send size={18} /></button></div>

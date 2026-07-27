@@ -1,25 +1,29 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import mimetypes
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
-from app.api.routes.images import start_turn, validate_size
+from app.api.routes.images import ImageQuality, start_turn, validate_size
 from app.core.database import connect, media_dir, now_iso
 from app.core.image_storage import (
     StoredImage,
     discard_stored_image,
+    read_original,
     retry_pending_deletions_once,
     store_image,
 )
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 MAX_REFERENCE_IMAGES = 16
+Provider = Literal["maolao", "relayrouter", "openai"]
+RouteMode = Literal["auto", "manual"]
 
 
 class ConversationCreate(BaseModel):
@@ -53,6 +57,13 @@ def _turn_payload(connection: Any, row: Any) -> dict[str, Any]:
         "SELECT * FROM images WHERE turn_id = ? ORDER BY kind DESC, position ASC", (turn["id"],)
     ).fetchall()
     turn["images"] = [_image_payload(dict(image)) for image in images]
+    attempts = connection.execute(
+        """SELECT provider, position, status, error_kind, error_message,
+                  submitted_at, completed_at
+           FROM provider_attempts WHERE turn_id = ? ORDER BY position""",
+        (turn["id"],),
+    ).fetchall()
+    turn["provider_attempts"] = [dict(attempt) for attempt in attempts]
     turn.pop("effective_prompt", None)
     return turn
 
@@ -147,24 +158,17 @@ def delete_conversation(conversation_id: str) -> None:
 
 
 def _source_context(connection: Any, conversation_id: str, source_image_id: str | None) -> tuple[str | None, str | None]:
-    if source_image_id:
-        row = connection.execute(
-            """SELECT images.id, turns.effective_prompt FROM images
-               JOIN turns ON turns.id = images.turn_id
-               WHERE images.id = ? AND images.kind = 'generated' AND turns.conversation_id = ?""",
-            (source_image_id, conversation_id),
-        ).fetchone()
-        if row is None:
-            raise HTTPException(status_code=422, detail="选中的参考图不属于当前对话")
-        return row["id"], row["effective_prompt"]
+    if not source_image_id:
+        return None, None
     row = connection.execute(
         """SELECT images.id, turns.effective_prompt FROM images
            JOIN turns ON turns.id = images.turn_id
-           WHERE turns.conversation_id = ? AND images.kind = 'generated'
-           ORDER BY turns.created_at DESC, images.position ASC LIMIT 1""",
-        (conversation_id,),
+           WHERE images.id = ? AND images.kind = 'generated' AND turns.conversation_id = ?""",
+        (source_image_id, conversation_id),
     ).fetchone()
-    return (row["id"], row["effective_prompt"]) if row else (None, None)
+    if row is None:
+        raise HTTPException(status_code=422, detail="选中的参考图不属于当前对话")
+    return row["id"], row["effective_prompt"]
 
 
 @router.post("/{conversation_id}/turns", status_code=202)
@@ -172,11 +176,26 @@ async def create_turn(
     conversation_id: str,
     prompt: str = Form(..., min_length=1, max_length=4000),
     size: str = Form(default="2880x2880"),
+    quality: ImageQuality = Form(default="low"),
     n: int = Form(default=1, ge=1, le=10),
+    route_mode: RouteMode = Form(default="auto"),
+    selected_provider: Provider | None = Form(default=None),
+    retry_of_turn_id: str | None = Form(default=None),
     source_image_id: str | None = Form(default=None),
     image: UploadFile | None = File(default=None),
     images: list[UploadFile] | None = File(default=None),
 ) -> dict[str, Any]:
+    # Direct unit-test calls do not resolve FastAPI Form defaults.
+    route_mode = route_mode if isinstance(route_mode, str) else "auto"
+    quality = quality if isinstance(quality, str) else "low"
+    selected_provider = selected_provider if isinstance(selected_provider, str) else None
+    retry_of_turn_id = retry_of_turn_id if isinstance(retry_of_turn_id, str) else None
+    if route_mode == "manual" and selected_provider is None:
+        raise HTTPException(status_code=422, detail="请选择手动生成线路")
+    if route_mode == "auto" and selected_provider is not None:
+        raise HTTPException(status_code=422, detail="自动模式不能指定单条线路")
+    if quality not in {"low", "high"}:
+        raise HTTPException(status_code=422, detail="图片质量只支持 low 或 high")
     selected_size = validate_size(size)
     prompt = prompt.strip()
     turn_id = str(uuid4())
@@ -195,6 +214,33 @@ async def create_turn(
         mime_type = upload.content_type or "image/png"
         extension = Path(upload.filename or "").suffix or mimetypes.guess_extension(mime_type) or ".png"
         pending_references.append((upload.filename or f"reference{extension}", mime_type, extension.lower(), content))
+
+    if retry_of_turn_id and not pending_references:
+        with connect() as connection:
+            retry_turn = connection.execute(
+                "SELECT source_image_id FROM turns WHERE id = ? AND conversation_id = ?",
+                (retry_of_turn_id, conversation_id),
+            ).fetchone()
+            if retry_turn is None:
+                raise HTTPException(status_code=422, detail="重试任务不属于当前对话")
+            rows = []
+            if retry_turn["source_image_id"]:
+                source = connection.execute(
+                    "SELECT * FROM images WHERE id = ?", (retry_turn["source_image_id"],)
+                ).fetchone()
+                if source is not None:
+                    rows.append(source)
+            rows.extend(connection.execute(
+                "SELECT * FROM images WHERE turn_id = ? AND kind = 'reference' ORDER BY position",
+                (retry_of_turn_id,),
+            ).fetchall())
+        for row in rows:
+            image_row = dict(row)
+            pending_references.append((
+                image_row["file_name"], image_row["mime_type"],
+                Path(image_row["stored_name"]).suffix or ".png", read_original(image_row),
+            ))
+        validate_reference_count(len(pending_references))
 
     for file_name, mime_type, extension, content in pending_references:
         image_id = str(uuid4())
@@ -223,12 +269,21 @@ async def create_turn(
                 source_id, base_prompt = _source_context(connection, conversation_id, source_image_id)
             if source_id and stored_references:
                 validate_reference_count(len(stored_references) + 1)
+            if retry_of_turn_id:
+                retry_source = connection.execute(
+                    "SELECT id FROM turns WHERE id = ? AND conversation_id = ?",
+                    (retry_of_turn_id, conversation_id),
+                ).fetchone()
+                if retry_source is None:
+                    raise HTTPException(status_code=422, detail="重试任务不属于当前对话")
             effective_prompt = prompt if not base_prompt else f"{base_prompt}\n\n请在参考图基础上进行以下调整：{prompt}"
             connection.execute(
                 """INSERT INTO turns
-                   (id, conversation_id, prompt, effective_prompt, size, n, status, source_image_id, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)""",
-                (turn_id, conversation_id, prompt, effective_prompt, selected_size, n, source_id, timestamp),
+                   (id, conversation_id, prompt, effective_prompt, size, quality, n, status,
+                    route_mode, selected_provider, retry_of_turn_id, source_image_id, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)""",
+                (turn_id, conversation_id, prompt, effective_prompt, selected_size, quality, n,
+                 route_mode, selected_provider, retry_of_turn_id, source_id, timestamp),
             )
             for position, (image_id, file_name, mime_type, stored) in enumerate(stored_references):
                 connection.execute(
@@ -255,5 +310,7 @@ async def create_turn(
         for stored_reference in stored_references:
             discard_stored_image(stored_reference[3])
         raise
-    start_turn(turn_id)
+    queued = start_turn(turn_id)
+    if inspect.isawaitable(queued):
+        await queued
     return result

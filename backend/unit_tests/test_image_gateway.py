@@ -26,6 +26,7 @@ def test_builds_json_generation_request_without_reference_image() -> None:
         prompt="a neon cat",
         size="2880x2880",
         n=3,
+        quality="low",
         reference_images=[],
     )
 
@@ -34,7 +35,7 @@ def test_builds_json_generation_request_without_reference_image() -> None:
         "model": "gpt-image-2-4k",
         "prompt": "a neon cat",
         "n": 3,
-        "quality": "high",
+        "quality": "low",
         "response_format": "b64_json",
         "size": "2880x2880",
     }
@@ -49,6 +50,7 @@ def test_builds_multipart_edit_request_with_reference_image() -> None:
         prompt="keep the subject",
         size="2160x3840",
         n=2,
+        quality="high",
         reference_images=[reference],
     )
 
@@ -79,6 +81,7 @@ def test_builds_multipart_request_with_repeated_image_field_for_multiple_images(
         prompt="combine both subjects",
         size="2880x2880",
         n=1,
+        quality="low",
         reference_images=references,
     )
 

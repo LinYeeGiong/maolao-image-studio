@@ -16,6 +16,16 @@
 
 ## 本地 Docker 启动
 
+图片任务通过 Redis + ARQ worker 异步执行。默认线路为 Maolao、RelayRouter、OpenAI 官方依次 fallback；也可在界面中指定单条线路。三条链路的 key 均只应配置在 `.env`：
+
+```env
+MAOLAO_API_KEY=
+RELAYROUTER_API_KEY=
+OPENAI_API_KEY=
+```
+
+`docker compose up -d --build` 会同时启动 `redis`、`backend`、`worker` 和 `frontend`。Redis 队列暂时不可用时，任务会保留在 SQLite，服务恢复后自动重新入队。
+
 1. 在项目根目录创建 `.env`：
 
    ```env

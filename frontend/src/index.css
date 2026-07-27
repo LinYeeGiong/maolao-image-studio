@@ -90,6 +90,13 @@ button, a, label { -webkit-tap-highlight-color: transparent; }
 .loader { width: 25px; height: 25px; border: 2px solid #624879; border-top-color: #c786ff; border-radius: 50%; animation: spin .8s linear infinite; }
 .turn-error, .global-error { color: #ffc0c4; border: 1px solid #733b42; background: #321e23; font-size: 13px; overflow-wrap: anywhere; }
 .turn-error { max-width: 620px; padding: 12px 14px; border-radius: 10px; }
+.retry-turn { margin-left: 8px; padding: 3px 7px; cursor: pointer; color: #f9e4ff; border: 1px solid #a77acb; border-radius: 6px; background: #4b315c; font-size: 12px; }
+.retry-notice { margin-bottom: 7px; padding: 8px 11px; color: #ffe3ad; border: 1px solid #735b36; border-radius: 9px; background: #332a1e; font-size: 12px; }
+.turn-partial { max-width: 620px; margin-top: 10px; padding: 10px 12px; color: #ffe3ad; border: 1px solid #735b36; border-radius: 10px; background: #332a1e; font-size: 13px; }
+.provider-attempts { max-width: 620px; margin: 0 0 10px; color: #aaa4af; font-size: 12px; }
+.provider-attempts summary { cursor: pointer; color: #c5a1e2; }
+.provider-attempts div { display: flex; gap: 7px; margin-top: 5px; padding-left: 4px; }
+.provider-attempts b { color: #d8d1de; font-weight: 600; }
 
 .composer-wrap { position: relative; z-index: 10; flex: 0 0 auto; padding: 12px max(24px, calc((100% - 880px) / 2)) 16px; background: linear-gradient(transparent, #17161b 18%); }
 .composer { position: relative; overflow: visible; border: 1px solid #46404b; border-radius: 17px; background: #242128; box-shadow: 0 17px 50px #0008; transition: border-color .2s; }
@@ -99,19 +106,42 @@ button, a, label { -webkit-tap-highlight-color: transparent; }
 .composer textarea:focus-visible { outline: none; }
 .composer-toolbar { display: flex; height: 45px; align-items: center; justify-content: space-between; padding: 0 9px 8px 11px; }
 .toolbar-left { display: flex; align-items: center; gap: 5px; }
-.tool-button, .parameter-trigger { display: flex; height: 31px; align-items: center; cursor: pointer; color: #aaa4af; border: 0; border-radius: 8px; background: transparent; }
+.tool-button, .route-trigger, .parameter-trigger { display: flex; height: 31px; align-items: center; cursor: pointer; color: #aaa4af; border: 0; border-radius: 8px; background: transparent; }
 .tool-button { width: 31px; justify-content: center; }
-.tool-button:hover, .parameter-trigger:hover { background: #343039; }
+.route-menu { position: relative; }
+.route-trigger { max-width: 118px; gap: 4px; padding: 0 8px; white-space: nowrap; font-size: 12px; }
+.route-trigger svg, .parameter-trigger svg { flex: 0 0 auto; transition: transform .16s ease; }
+.route-trigger[aria-expanded="true"] svg, .parameter-trigger[aria-expanded="true"] svg { transform: rotate(180deg); }
+.toolbar-popover { position: absolute; bottom: 39px; left: 0; border: 1px solid #403b45; border-radius: 13px; background: #211f24; box-shadow: 0 18px 50px #0009; }
+.route-popover { display: grid; width: 154px; gap: 4px; padding: 8px; }
+.route-popover button { display: flex; width: 100%; height: 34px; align-items: center; justify-content: space-between; padding: 0 9px; cursor: pointer; color: #b7b0bd; border: 0; border-radius: 8px; background: transparent; text-align: left; font-size: 12px; }
+.route-popover button:hover { color: #eee8f2; background: #302c34; }
+.route-popover button.selected { color: #d7b5ff; background: #2b2333; }
+.route-popover button:focus-visible { outline: 2px solid #8e64b7; outline-offset: -2px; }
+.tool-button:hover, .route-trigger:hover, .parameter-trigger:hover { background: #343039; }
+.route-trigger:focus-visible, .parameter-trigger:focus-visible { outline: 2px solid #7958a0; outline-offset: 1px; }
 .tool-button input { display: none; }
 .parameter-menu { position: relative; }
-.parameter-trigger { gap: 5px; padding: 0 9px; font-size: 12px; }
-.parameter-popover { position: absolute; width: 315px; bottom: 39px; left: 0; padding: 14px; border: 1px solid #403b45; border-radius: 13px; background: #211f24; box-shadow: 0 18px 50px #0009; }
+.parameter-trigger { max-width: 178px; gap: 5px; padding: 0 9px; font-size: 12px; white-space: nowrap; }
+.parameter-popover { width: 315px; padding: 14px; }
 .parameter-popover > strong { display: block; margin-bottom: 13px; font-size: 14px; }
 .parameter-popover > label { display: flex; margin: 11px 0 8px; justify-content: space-between; color: #a19ba6; font-size: 12px; }
 .parameter-popover > label b { color: #bda5d8; }
 .ratio-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
 .ratio-list button { display: flex; min-width: 0; height: 66px; align-items: center; justify-content: center; flex-direction: column; cursor: pointer; color: #7e7884; border: 1px solid #3b3740; border-radius: 9px; background: #19181c; }
 .ratio-list button.selected { color: #cba3ff; border-color: #815bb1; background: #2b2333; }
+.ratio-list button:hover { color: #b9a9c7; border-color: #57505f; background: #252229; }
+.ratio-list button.selected:hover { color: #d8b9ff; border-color: #956bc4; background: #30263a; }
+.ratio-list button:focus-visible { outline: 2px solid #8e64b7; outline-offset: 1px; }
+.quality-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+.quality-list button { display: flex; height: 52px; align-items: flex-start; justify-content: center; flex-direction: column; padding: 0 10px; cursor: pointer; color: #8d8794; border: 1px solid #3b3740; border-radius: 9px; background: #19181c; text-align: left; }
+.quality-list button:hover { color: #c7c0ce; border-color: #57505f; background: #252229; }
+.quality-list button.selected { color: #cba3ff; border-color: #815bb1; background: #2b2333; }
+.quality-list b, .quality-list small { display: block; }
+.quality-list b { font-size: 12px; }
+.quality-list small { margin-top: 3px; color: #918b96; font-size: 10px; }
+.quality-list button.selected small { color: #c6a7e5; }
+.quality-list button:focus-visible { outline: 2px solid #8e64b7; outline-offset: 1px; }
 .ratio-list b { margin-top: 4px; font-size: 11px; }
 .ratio-list small { color: #918b96; font-size: 9px; }
 .ratio-icon { display: block; border: 1px solid currentColor; border-radius: 2px; }
