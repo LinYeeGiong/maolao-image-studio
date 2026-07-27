@@ -9,7 +9,8 @@
 - 支持 1:1、16:9、9:16 三种 4K 尺寸，一次最多生成 10 张图片
 - 选择任意生成结果，通过自然语言继续优化
 - 每个对话独立保存提示词、参数、任务状态和生成结果
-- SQLite 与图片文件通过 Docker volume 持久化
+- SQLite 与历史图片通过 Docker volume 持久化，新图片可保存到私有腾讯云 COS
+- 自动生成 1440px WebP 预览图和 480px WebP 缩略图，4K 原图按需加载
 - 删除对话时同步删除关联的上传图和生成图
 - 后端持续轮询异步任务，页面关闭或服务重启后仍可恢复
 
@@ -20,6 +21,7 @@
    ```env
    MAOLAO_API_KEY=sk-your-api-key
    MAOLAO_BASE_URL=https://maolaoapi.com
+   COS_ENABLED=false
    ```
 
 2. 构建并启动：
@@ -74,6 +76,14 @@ docker compose down
    ```env
    MAOLAO_API_KEY=sk-your-api-key
    MAOLAO_BASE_URL=https://maolaoapi.com
+   COS_ENABLED=true
+   COS_SECRET_ID=your-cam-secret-id
+   COS_SECRET_KEY=your-cam-secret-key
+   COS_BUCKET=huajing-1437302460
+   COS_REGION=ap-guangzhou
+   COS_ENDPOINT=https://huajing-1437302460.cos.ap-guangzhou.myqcloud.com
+   COS_SIGNED_URL_TTL=3600
+   COS_OBJECT_PREFIX=maolao
    ```
 
 4. 拉取镜像并启动：
@@ -90,6 +100,22 @@ docker compose down
    ```
 
 服务只监听服务器本机的 `7820` 端口，不会直接暴露 FastAPI 后端端口。
+
+## 腾讯云 COS 配置
+
+Bucket 保持“私有读写”。创建独立 CAM 子账号或访问密钥，只授予 Bucket `huajing-1437302460` 下 `maolao/*` 对象的上传、读取、查询和删除权限。不要使用主账号永久密钥，也不要把密钥提交到 GitHub、写入前端或写入 Dockerfile。
+
+在腾讯云 COS 控制台为 Bucket 添加跨域规则：
+
+- 来源：正式站点域名；本地调试时可另加本地前端地址
+- 方法：`GET`、`HEAD`
+- Allowed Headers：`*`
+- Expose Headers：`ETag`、`Content-Length`、`Content-Type`
+- Max-Age：`86400`
+
+后端只把 COS Object Key 保存到 SQLite。浏览器访问本站稳定图片地址时，后端签发短期私有 URL 并重定向到 COS，图片内容不会经过 FastAPI。签名默认1小时有效，不影响历史记录；下次访问会生成新签名。
+
+COS 临时不可用时，新图片会保存在 Docker 数据卷并标记为待上传。后端会周期性重试，成功后切换到 COS。COS 错误会单独记录，不会显示成 `openai_error`。
 
 ### 更新
 
@@ -129,7 +155,9 @@ docker compose -f compose.prod.yml up -d
 容器内数据保存在 `/data`：
 
 - `/data/maolao.db`：对话、轮次和任务记录
-- `/data/media/`：用户参考图和生成图
+- `/data/media/`：历史图片、COS未启用时的新图片，以及COS故障期间的临时降级图片
+
+COS启用后，新参考图和生成图的原图、预览图和缩略图保存在 `maolao/{conversation_id}/{turn_id}/{image_id}/` 前缀下。已有本地图片不会自动迁移，仍可继续访问。
 
 查看数据卷：
 
