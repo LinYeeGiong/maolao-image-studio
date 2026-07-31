@@ -16,11 +16,18 @@ class FakeCosClient:
     def __init__(self, *, fail_upload: bool = False) -> None:
         self.fail_upload = fail_upload
         self.objects: dict[str, bytes] = {}
+        self.multipart_keys: list[str] = []
 
     def put_object(self, *, Key: str, Body: bytes, **_: object) -> None:
         if self.fail_upload:
             raise RuntimeError("temporary COS outage with secret-looking data")
         self.objects[Key] = Body
+
+    def upload_file_from_buffer(self, *, Key: str, Body: object, **_: object) -> None:
+        if self.fail_upload:
+            raise RuntimeError("temporary COS outage with secret-looking data")
+        self.multipart_keys.append(Key)
+        self.objects[Key] = Body.read()  # type: ignore[attr-defined]
 
     def delete_object(self, *, Key: str, **_: object) -> None:
         self.objects.pop(Key, None)
@@ -86,6 +93,28 @@ def test_defer_upload_skips_cos_and_marks_pending(tmp_path, monkeypatch) -> None
     assert client.objects == {}
     assert stored.object_key is not None
     assert (media_dir() / stored.stored_name).is_file()
+
+
+def test_large_original_uploads_in_parts_and_small_variants_do_not(monkeypatch) -> None:
+    configure_cos(monkeypatch, True)
+    monkeypatch.setattr(settings, "COS_MULTIPART_THRESHOLD_BYTES", 1024)
+    client = FakeCosClient()
+    original = b"x" * 4096
+
+    image_storage._upload_variants(
+        client,
+        object_key="key/original.png",
+        preview_key="key/preview.webp",
+        thumbnail_key="key/thumbnail.webp",
+        original=original,
+        preview=b"small-preview",
+        thumbnail=b"small-thumb",
+        mime_type="image/png",
+    )
+
+    assert client.multipart_keys == ["key/original.png"]
+    assert client.objects["key/original.png"] == original
+    assert client.objects["key/preview.webp"] == b"small-preview"
 
 
 def test_builds_bounded_webp_preview_and_thumbnail() -> None:

@@ -46,6 +46,7 @@ def _build_client(endpoint: str | None) -> CosS3Client:
         SecretKey=settings.COS_SECRET_KEY,
         Scheme="https",
         Endpoint=endpoint or None,
+        Timeout=settings.COS_TIMEOUT_SECONDS,
     )
     return CosS3Client(config)
 
@@ -134,6 +135,24 @@ def build_variants(content: bytes) -> tuple[bytes, bytes]:
         return _webp_variant(oriented, 1440), _webp_variant(oriented, 480)
 
 
+def _put_object(client: Any, *, key: str, body: bytes, content_type: str) -> None:
+    common = {
+        "Bucket": settings.COS_BUCKET,
+        "Key": key,
+        "ContentType": content_type,
+        "CacheControl": IMMUTABLE_CACHE_CONTROL,
+    }
+    if len(body) < settings.COS_MULTIPART_THRESHOLD_BYTES:
+        client.put_object(Body=body, **common)
+        return
+    # Serial parts: this host's egress is the bottleneck, so parallelism buys
+    # nothing, but per-part retries keep a stalled chunk from losing the
+    # whole transfer.
+    client.upload_file_from_buffer(
+        Body=BytesIO(body), PartSize=1, MAXThread=1, **common
+    )
+
+
 def _upload_variants(
     client: Any,
     *,
@@ -153,13 +172,7 @@ def _upload_variants(
     )
     try:
         for key, body, content_type in values:
-            client.put_object(
-                Bucket=settings.COS_BUCKET,
-                Key=key,
-                Body=body,
-                ContentType=content_type,
-                CacheControl=IMMUTABLE_CACHE_CONTROL,
-            )
+            _put_object(client, key=key, body=body, content_type=content_type)
             uploaded.append(key)
     except Exception:
         for key in uploaded:

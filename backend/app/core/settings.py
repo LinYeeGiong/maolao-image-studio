@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     # the VPC network instead of the bandwidth-capped public egress. Empty
     # lets the SDK derive the public endpoint from COS_REGION.
     COS_API_ENDPOINT: str = ""
+    # A generated 4K PNG is ~15MB and this host's public egress is heavily
+    # capped, so the SDK's 60s default aborts the upload just as it is about
+    # to finish and the object never lands.
+    COS_TIMEOUT_SECONDS: int = 600
+    # Above this, upload in parts so a stalled chunk retries on its own
+    # instead of restarting the whole transfer.
+    COS_MULTIPART_THRESHOLD_BYTES: int = 4 * 1024 * 1024
     COS_SIGNED_URL_TTL: int = 3600
     COS_OBJECT_PREFIX: str = "maolao"
     COS_RETRY_INTERVAL_SECONDS: float = 60.0
