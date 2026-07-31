@@ -7,6 +7,7 @@ import pytest
 
 from app.api.routes.images import (
     ImageSize,
+    _upstream_error,
     build_image_download_request,
     build_maolao_request,
     download_generated_image,
@@ -466,6 +467,25 @@ def test_limits_error_response_body_before_reporting_failure() -> None:
 
     assert "01234567" in str(exc_info.value)
     assert "0123456789" not in str(exc_info.value)
+
+
+def test_summarizes_gateway_html_error_page_instead_of_dumping_markup() -> None:
+    response = httpx.Response(
+        502,
+        text="<!DOCTYPE html><html><head><title>502: Bad gateway</title></head></html>",
+        headers={"content-type": "text/html; charset=UTF-8"},
+    )
+
+    message = _upstream_error(response)
+
+    assert "502" in message
+    assert "<" not in message
+
+
+def test_keeps_plain_text_upstream_error_body() -> None:
+    response = httpx.Response(400, text="quota exceeded")
+
+    assert _upstream_error(response) == "quota exceeded"
 
 
 def test_formats_empty_exception_with_class_name() -> None:

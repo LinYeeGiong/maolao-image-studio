@@ -331,7 +331,11 @@ async def process_turn_job(_: dict[str, Any], turn_id: str) -> None:
     else:
         plan = list(PROVIDERS)
     prior = {attempt["provider"]: attempt for attempt in existing}
-    async with httpx.AsyncClient(timeout=settings.PROVIDER_REQUEST_TIMEOUT_SECONDS) as client:
+    timeout = httpx.Timeout(
+        settings.PROVIDER_REQUEST_TIMEOUT_SECONDS,
+        connect=settings.PROVIDER_CONNECT_TIMEOUT_SECONDS,
+    )
+    async with httpx.AsyncClient(timeout=timeout) as client:
         for position, provider in enumerate(plan):
             if provider not in PROVIDERS:
                 _finish_turn(turn, "failed", "Unsupported provider selection", started)

@@ -125,7 +125,15 @@ def _upstream_error(response: httpx.Response) -> str:
     try:
         detail = response.json()
     except ValueError:
-        return response.text or f"MaolaoAPI 请求失败 ({response.status_code})"
+        body = response.text or ""
+        media_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+        # A gateway that is down answers with a full HTML error page. Showing
+        # its markup to the user tells them nothing and buries the status.
+        if media_type in {"text/html", "application/xhtml+xml"} or body.lstrip()[
+            :14
+        ].lower().startswith(("<!doctype", "<html")):
+            return f"上游网关返回错误页 ({response.status_code})"
+        return body or f"MaolaoAPI 请求失败 ({response.status_code})"
     if isinstance(detail, dict):
         error = detail.get("error") or detail.get("detail")
         if isinstance(error, dict):

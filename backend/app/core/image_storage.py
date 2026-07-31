@@ -397,7 +397,6 @@ def discard_stored_image(stored: StoredImage) -> None:
                 if key
             ]
         )
-        retry_pending_deletions_once()
     _remove_local_variants(stored.stored_name)
 
 

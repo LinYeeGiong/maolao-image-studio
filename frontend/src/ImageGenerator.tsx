@@ -93,10 +93,17 @@ export default function ImageGenerator() {
   const [routeOpen, setRouteOpen] = useState(false)
   const [parametersOpen, setParametersOpen] = useState(false)
   const [now, setNow] = useState(Date.now())
+  // Read inside async callbacks, which would otherwise close over a stale activeId.
+  const activeIdRef = useRef<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const promptRef = useRef<HTMLTextAreaElement>(null)
   const routeMenuRef = useRef<HTMLDivElement>(null)
   const parameterMenuRef = useRef<HTMLDivElement>(null)
+
+  const selectConversation = useCallback((id: string | null) => {
+    activeIdRef.current = id
+    setActiveId(id)
+  }, [])
 
   const loadConversations = useCallback(async () => {
     const items = await request<Conversation[]>("/api/v1/conversations")
@@ -106,6 +113,9 @@ export default function ImageGenerator() {
 
   const loadConversation = useCallback(async (id: string, inherit = false) => {
     const item = await request<Conversation>(`/api/v1/conversations/${id}`)
+    // A poll started before the user switched away must not overwrite what
+    // they are looking at now, or the old conversation snaps back.
+    if (activeIdRef.current !== id) return item
     setConversation(item)
     if (inherit && item.turns?.length) {
       const last = item.turns[item.turns.length - 1]
@@ -118,9 +128,9 @@ export default function ImageGenerator() {
 
   useEffect(() => {
     loadConversations().then((items) => {
-      if (items[0]) setActiveId(items[0].id)
+      if (items[0]) selectConversation(items[0].id)
     }).catch((caught) => setError(caught.message))
-  }, [loadConversations])
+  }, [loadConversations, selectConversation])
 
   useEffect(() => {
     setSourceImage(null)
@@ -192,7 +202,7 @@ export default function ImageGenerator() {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "新对话" }),
         })
         id = created.id
-        setActiveId(id)
+        selectConversation(id)
       }
       const form = new FormData()
       form.append("prompt", prompt.trim()); form.append("size", size); form.append("quality", quality); form.append("n", String(count))
@@ -229,7 +239,7 @@ export default function ImageGenerator() {
     try {
       await request(`/api/v1/conversations/${modal.conversationId}`, { method: "DELETE" })
       const remaining = await loadConversations()
-      setActiveId(remaining[0]?.id || null)
+      selectConversation(remaining[0]?.id || null)
       setModal(null)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "删除失败")
@@ -276,12 +286,12 @@ export default function ImageGenerator() {
     <div className="app-shell">
       <aside className={`sidebar ${sidebarOpen ? "open" : ""}`}>
         <div className="brand"><div className="brand-mark"><Sparkles size={18} /></div><span>Maolao Studio</span><button onClick={() => setSidebarOpen(false)}><X size={18} /></button></div>
-        <button className="new-chat" onClick={() => { setActiveId(null); setSidebarOpen(false) }}><Plus size={17} /> 新建对话</button>
+        <button className="new-chat" onClick={() => { selectConversation(null); setSidebarOpen(false) }}><Plus size={17} /> 新建对话</button>
         <label className="search-box"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索对话" /></label>
         <div className="conversation-list">
           <small>最近对话</small>
           {filtered.map((item) => <div className={`conversation-row ${activeId === item.id ? "active" : ""}`} key={item.id}>
-            <button className="conversation-main" onClick={() => { setActiveId(item.id); setSidebarOpen(false) }}>
+            <button className="conversation-main" onClick={() => { selectConversation(item.id); setSidebarOpen(false) }}>
               <MessageSquare size={16} /><span><strong>{item.title}</strong><em>{item.turn_count} 轮 · {formatDate(item.updated_at)}</em></span>
             </button>
             <button className="delete-chat" onClick={() => setModal({ type: "delete", conversationId: item.id, title: item.title })} title="删除"><Trash2 size={14} /></button>

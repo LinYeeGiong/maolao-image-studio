@@ -17,7 +17,6 @@ from app.core.image_storage import (
     discard_stored_image,
     public_variant_url,
     read_original,
-    retry_pending_deletions_once,
     store_image,
 )
 
@@ -164,7 +163,9 @@ def delete_conversation(conversation_id: str) -> None:
         stem = Path(stored_name).stem
         for name in (stored_name, f"{stem}-preview.webp", f"{stem}-thumbnail.webp"):
             (media_dir() / name).unlink(missing_ok=True)
-    retry_pending_deletions_once()
+    # The queued COS deletions are drained by the storage maintenance loop.
+    # Doing them here made deleting an old conversation wait on one network
+    # round trip per object, over an already-saturated uplink.
 
 
 def _source_context(connection: Any, conversation_id: str, source_image_id: str | None) -> tuple[str | None, str | None]:
