@@ -45,6 +45,7 @@ def _client() -> CosS3Client:
         SecretId=settings.COS_SECRET_ID,
         SecretKey=settings.COS_SECRET_KEY,
         Scheme="https",
+        Endpoint=settings.COS_API_ENDPOINT or None,
     )
     return CosS3Client(config)
 

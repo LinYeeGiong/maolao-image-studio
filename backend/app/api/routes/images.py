@@ -302,6 +302,7 @@ def _save_generated_image(
         extension=extension,
         mime_type=media_type,
         content=content,
+        defer_upload=True,
     )
     try:
         with connect() as connection:

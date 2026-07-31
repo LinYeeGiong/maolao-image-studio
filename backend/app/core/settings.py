@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     COS_BUCKET: str = "huajing-1437302460"
     COS_REGION: str = "ap-guangzhou"
     COS_ENDPOINT: str = "https://huajing-1437302460.cos.ap-guangzhou.myqcloud.com"
+    # Domain suffix the SDK talks to, without scheme or bucket, e.g.
+    # "cos-internal.ap-guangzhou.myqcloud.com" to keep same-region traffic on
+    # the VPC network instead of the bandwidth-capped public egress. Empty
+    # lets the SDK derive the public endpoint from COS_REGION.
+    COS_API_ENDPOINT: str = ""
     COS_SIGNED_URL_TTL: int = 3600
     COS_OBJECT_PREFIX: str = "maolao"
     COS_RETRY_INTERVAL_SECONDS: float = 60.0

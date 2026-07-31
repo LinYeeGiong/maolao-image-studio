@@ -2,6 +2,7 @@ from io import BytesIO
 
 from PIL import Image
 
+from app.core import image_storage
 from app.core.database import connect, init_database, media_dir, now_iso
 from app.core.image_storage import (
     build_variants,
@@ -38,6 +39,49 @@ def configure_cos(monkeypatch, enabled: bool) -> None:
     monkeypatch.setattr(settings, "COS_BUCKET", "bucket-123")
     monkeypatch.setattr(settings, "COS_REGION", "ap-guangzhou")
     monkeypatch.setattr(settings, "COS_OBJECT_PREFIX", "maolao")
+
+
+def test_client_uses_configured_api_endpoint(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_config(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    configure_cos(monkeypatch, True)
+    monkeypatch.setattr(image_storage, "CosConfig", fake_config)
+    monkeypatch.setattr(image_storage, "CosS3Client", lambda config: config)
+
+    monkeypatch.setattr(settings, "COS_API_ENDPOINT", "cos-internal.ap-guangzhou.myqcloud.com")
+    image_storage._client()
+    assert captured["Endpoint"] == "cos-internal.ap-guangzhou.myqcloud.com"
+
+    monkeypatch.setattr(settings, "COS_API_ENDPOINT", "")
+    image_storage._client()
+    assert captured["Endpoint"] is None
+
+
+def test_defer_upload_skips_cos_and_marks_pending(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    configure_cos(monkeypatch, True)
+    client = FakeCosClient()
+
+    stored = store_image(
+        conversation_id="conversation-1",
+        turn_id="turn-1",
+        image_id="image-1",
+        extension=".png",
+        mime_type="image/png",
+        content=png_bytes(800, 400),
+        client=client,
+        defer_upload=True,
+    )
+
+    assert stored.storage_status == "pending_upload"
+    assert stored.storage_backend == "local"
+    assert client.objects == {}
+    assert stored.object_key is not None
+    assert (media_dir() / stored.stored_name).is_file()
 
 
 def test_builds_bounded_webp_preview_and_thumbnail() -> None:
