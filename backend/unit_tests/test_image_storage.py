@@ -117,6 +117,54 @@ def test_large_original_uploads_in_parts_and_small_variants_do_not(monkeypatch) 
     assert client.objects["key/preview.webp"] == b"small-preview"
 
 
+class SigningCosClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def get_presigned_url(self, *, Key: str, **_: object) -> str:
+        self.calls += 1
+        # Real signatures embed a timestamp, so every call differs.
+        return f"https://bucket.cos.example/{Key}?sign={self.calls}"
+
+
+def test_signed_url_is_stable_across_polls(monkeypatch) -> None:
+    configure_cos(monkeypatch, True)
+    image_storage._SIGNED_URL_CACHE.clear()
+    client = SigningCosClient()
+    row = {"object_key": "maolao/a/original.png", "preview_key": "maolao/a/preview.webp"}
+
+    first = image_storage.signed_url(row, "preview", client=client)
+    second = image_storage.signed_url(row, "preview", client=client)
+
+    # A changing URL would bust the browser cache on every 2.5s poll.
+    assert first == second
+    assert client.calls == 1
+
+
+def test_signed_url_separates_download_disposition(monkeypatch) -> None:
+    configure_cos(monkeypatch, True)
+    image_storage._SIGNED_URL_CACHE.clear()
+    client = SigningCosClient()
+    row = {"object_key": "maolao/a/original.png"}
+
+    inline = image_storage.signed_url(row, "original", client=client)
+    attachment = image_storage.signed_url(row, "original", download_name="a.png", client=client)
+
+    assert inline != attachment
+
+
+def test_public_variant_url_falls_back_to_local_until_uploaded(monkeypatch) -> None:
+    configure_cos(monkeypatch, True)
+    image_storage._SIGNED_URL_CACHE.clear()
+    pending = {
+        "storage_backend": "local",
+        "storage_status": "pending_upload",
+        "preview_key": "maolao/a/preview.webp",
+    }
+
+    assert image_storage.public_variant_url(pending, "preview") is None
+
+
 def test_builds_bounded_webp_preview_and_thumbnail() -> None:
     preview, thumbnail = build_variants(png_bytes())
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -17,6 +19,13 @@ from app.core.settings import settings
 ImageVariant = Literal["original", "preview", "thumbnail"]
 WEBP_QUALITY = 84
 IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
+
+# Every signature embeds a fresh timestamp, so re-signing on each poll would
+# hand the browser a new URL every 2.5s and defeat its cache entirely. Reuse
+# one signature per object until it nears expiry.
+_SIGNED_URL_CACHE: OrderedDict[tuple[str, str | None], tuple[float, str]] = OrderedDict()
+_SIGNED_URL_CACHE_LIMIT = 2048
+_SIGNED_URL_REFRESH_MARGIN_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -303,6 +312,12 @@ def signed_url(
     key = row.get(key_name)
     if not key:
         raise RuntimeError("cos_read_error")
+    cache_key = (str(key), download_name)
+    now = time.monotonic()
+    cached = _SIGNED_URL_CACHE.get(cache_key)
+    if cached is not None and cached[0] > now:
+        _SIGNED_URL_CACHE.move_to_end(cache_key)
+        return cached[1]
     params: dict[str, str] = {}
     if download_name:
         encoded = quote(download_name, safe="")
@@ -310,7 +325,7 @@ def signed_url(
             f"attachment; filename*=UTF-8''{encoded}"
         )
     try:
-        return (client or _public_client()).get_presigned_url(
+        url = (client or _public_client()).get_presigned_url(
             Method="GET",
             Bucket=settings.COS_BUCKET,
             Key=key,
@@ -319,6 +334,27 @@ def signed_url(
         )
     except Exception as exc:
         raise RuntimeError("cos_read_error") from exc
+    expiry = now + max(settings.COS_SIGNED_URL_TTL - _SIGNED_URL_REFRESH_MARGIN_SECONDS, 60)
+    _SIGNED_URL_CACHE[cache_key] = (expiry, str(url))
+    _SIGNED_URL_CACHE.move_to_end(cache_key)
+    while len(_SIGNED_URL_CACHE) > _SIGNED_URL_CACHE_LIMIT:
+        _SIGNED_URL_CACHE.popitem(last=False)
+    return str(url)
+
+
+def public_variant_url(
+    row: dict[str, Any],
+    variant: ImageVariant,
+    *,
+    download_name: str | None = None,
+) -> str | None:
+    """A COS URL the browser can fetch directly, or None to serve it locally."""
+    if row.get("storage_backend") != "cos" or row.get("storage_status") != "ready":
+        return None
+    try:
+        return signed_url(row, variant, download_name=download_name)
+    except RuntimeError:
+        return None
 
 
 def retry_pending_uploads_once(client: Any | None = None) -> int:

@@ -15,6 +15,7 @@ from app.core.database import connect, media_dir, now_iso
 from app.core.image_storage import (
     StoredImage,
     discard_stored_image,
+    public_variant_url,
     read_original,
     retry_pending_deletions_once,
     store_image,
@@ -40,14 +41,23 @@ def validate_reference_count(count: int) -> None:
 
 
 def _image_payload(row: dict[str, Any]) -> dict[str, Any]:
+    # Prefer a direct COS URL so image bytes never traverse this host, whose
+    # public egress is the scarce resource. Anything not on COS yet keeps
+    # pointing here and is served off local disk.
     base = f"/api/v1/images/{row['id']}"
+    preview = public_variant_url(row, "preview") or f"{base}/preview"
+    thumbnail = public_variant_url(row, "thumbnail") or f"{base}/thumbnail"
+    download = (
+        public_variant_url(row, "original", download_name=row["file_name"])
+        or f"{base}/download"
+    )
     return {
         "id": row["id"], "kind": row["kind"], "position": row["position"],
         "file_name": row["file_name"], "mime_type": row["mime_type"],
-        "url": f"{base}/preview",
-        "thumbnail_url": f"{base}/thumbnail",
-        "preview_url": f"{base}/preview",
-        "download_url": f"{base}/download",
+        "url": preview,
+        "thumbnail_url": thumbnail,
+        "preview_url": preview,
+        "download_url": download,
     }
 
 
