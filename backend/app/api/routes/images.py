@@ -28,6 +28,12 @@ TRUSTED_IMAGE_HOST_SUFFIXES = (
     ".openaiusercontent.com",
 )
 ALLOWED_GENERATED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+# Generated images are already-compressed formats, so negotiating gzip/deflate
+# buys nothing and forces the upstream CDN to re-compress on the fly. That
+# path streams without a Content-Length and blows up with a zlib
+# "incorrect header check" whenever it is cut short, so ask for the bytes
+# verbatim instead.
+IDENTITY_ENCODING_HEADERS = {"Accept-Encoding": "identity"}
 
 
 @dataclass(frozen=True)
@@ -140,12 +146,13 @@ async def download_generated_image(
 ) -> httpx.Response:
     if attempts < 1:
         raise ValueError("Download attempts must be at least 1")
+    headers = {**(request.headers or {}), **IDENTITY_ENCODING_HEADERS}
     for attempt in range(attempts):
         try:
             async with client.stream(
                 "GET",
                 request.url,
-                headers=request.headers,
+                headers=headers,
                 follow_redirects=False,
             ) as response:
                 if response.is_success:

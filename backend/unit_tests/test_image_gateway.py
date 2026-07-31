@@ -213,6 +213,34 @@ def test_retries_temporary_download_failure_then_returns_image() -> None:
     assert attempts == 2
 
 
+def test_download_opts_out_of_compressed_transfer_encodings() -> None:
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("accept-encoding"))
+        return httpx.Response(
+            200,
+            content=b"\x89PNG\r\n\x1a\npng-data",
+            headers={"content-type": "image/png"},
+            request=request,
+        )
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            request = build_image_download_request(
+                result_item={},
+                upstream_task_id="task-1",
+                index=0,
+                base_url="https://maolaoapi.com",
+                api_headers={"Authorization": "Bearer secret"},
+            )
+            await download_generated_image(client, request, retry_delay_seconds=0)
+
+    asyncio.run(run())
+
+    assert seen == ["identity"]
+
+
 def test_retries_corrupted_gzip_stream_then_returns_image() -> None:
     attempts = 0
 

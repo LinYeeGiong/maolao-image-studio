@@ -11,6 +11,7 @@ from uuid import uuid4
 import httpx
 
 from app.api.routes.images import (
+    IDENTITY_ENCODING_HEADERS,
     _save_generated_image,
     _upstream_error,
     build_image_download_request,
@@ -150,7 +151,9 @@ async def _download_url(client: httpx.AsyncClient, url: str) -> tuple[bytes, str
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.netloc:
         raise ProviderFailure("fatal", "Provider returned an invalid image URL")
-    response = await client.get(url, follow_redirects=True)
+    response = await client.get(
+        url, headers=IDENTITY_ENCODING_HEADERS, follow_redirects=True
+    )
     if not response.is_success:
         raise _classify_response(response)
     content_type = response.headers.get("content-type", "image/png").split(";", 1)[0]
