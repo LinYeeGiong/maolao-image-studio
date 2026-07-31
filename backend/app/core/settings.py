@@ -26,9 +26,10 @@ class Settings(BaseSettings):
     QUEUE_RECONCILE_INTERVAL_SECONDS: float = 30.0
     PROVIDER_REQUEST_TIMEOUT_SECONDS: float = 300.0
     # Generation legitimately takes minutes, but opening the socket should
-    # not. A blocked host otherwise burns the full request budget before the
-    # chain moves on to the next provider.
-    PROVIDER_CONNECT_TIMEOUT_SECONDS: float = 10.0
+    # not. Kept well above a healthy handshake because this host's uplink is
+    # congested enough that even connecting is slow under load -- 10s here
+    # made a reachable provider look unreachable.
+    PROVIDER_CONNECT_TIMEOUT_SECONDS: float = 45.0
     DATA_DIR: str = "/data"
     TASK_POLL_INTERVAL_SECONDS: float = 2.5
     COS_ENABLED: bool = False
