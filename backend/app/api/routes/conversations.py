@@ -253,6 +253,7 @@ async def create_turn(
                 extension=extension,
                 mime_type=mime_type,
                 content=content,
+                defer_upload=True,
             )
         except Exception:
             for stored_reference in stored_references:

@@ -169,6 +169,7 @@ def store_image(
     mime_type: str,
     content: bytes,
     client: Any | None = None,
+    defer_upload: bool = False,
 ) -> StoredImage:
     normalized_extension = extension.lower()
     if normalized_extension == ".jpeg":
@@ -195,6 +196,19 @@ def store_image(
     object_key, preview_key, thumbnail_key = _object_keys(
         conversation_id, turn_id, image_id, normalized_extension
     )
+    if defer_upload:
+        # Skip the synchronous COS round-trip on this path so the caller
+        # (a user-facing request) doesn't block on network I/O; the
+        # storage maintenance loop uploads it shortly after via
+        # retry_pending_uploads_once, same as a failed upload would.
+        return StoredImage(
+            stored_name=stored_name,
+            storage_backend="local",
+            storage_status="pending_upload",
+            object_key=object_key,
+            preview_key=preview_key,
+            thumbnail_key=thumbnail_key,
+        )
     try:
         _upload_variants(
             client or _client(),
