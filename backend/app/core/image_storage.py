@@ -18,6 +18,14 @@ from app.core.settings import settings
 
 ImageVariant = Literal["original", "preview", "thumbnail"]
 WEBP_QUALITY = 84
+PREVIEW_MAX_EDGE = 1440
+THUMBNAIL_MAX_EDGE = 480
+# Once an object is on COS, its smaller renditions come from Data Processing
+# (数据万象) on the fly, so we never generate or store them there.
+_COS_VARIANT_PROCESSING = {
+    "preview": f"imageMogr2/thumbnail/{PREVIEW_MAX_EDGE}x{PREVIEW_MAX_EDGE}",
+    "thumbnail": f"imageMogr2/thumbnail/{THUMBNAIL_MAX_EDGE}x{THUMBNAIL_MAX_EDGE}",
+}
 IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 
 # Every signature embeds a fresh timestamp, so re-signing on each poll would
@@ -141,7 +149,10 @@ def build_variants(content: bytes) -> tuple[bytes, bytes]:
     with Image.open(BytesIO(content)) as source:
         source.load()
         oriented = ImageOps.exif_transpose(source)
-        return _webp_variant(oriented, 1440), _webp_variant(oriented, 480)
+        return (
+            _webp_variant(oriented, PREVIEW_MAX_EDGE),
+            _webp_variant(oriented, THUMBNAIL_MAX_EDGE),
+        )
 
 
 def _put_object(client: Any, *, key: str, body: bytes, content_type: str) -> None:
@@ -162,34 +173,11 @@ def _put_object(client: Any, *, key: str, body: bytes, content_type: str) -> Non
     )
 
 
-def _upload_variants(
-    client: Any,
-    *,
-    object_key: str,
-    preview_key: str,
-    thumbnail_key: str,
-    original: bytes,
-    preview: bytes,
-    thumbnail: bytes,
-    mime_type: str,
+def _upload_original(
+    client: Any, *, object_key: str, original: bytes, mime_type: str
 ) -> None:
-    uploaded: list[str] = []
-    values = (
-        (object_key, original, mime_type),
-        (preview_key, preview, "image/webp"),
-        (thumbnail_key, thumbnail, "image/webp"),
-    )
-    try:
-        for key, body, content_type in values:
-            _put_object(client, key=key, body=body, content_type=content_type)
-            uploaded.append(key)
-    except Exception:
-        for key in uploaded:
-            try:
-                client.delete_object(Bucket=settings.COS_BUCKET, Key=key)
-            except Exception:
-                pass
-        raise
+    """Push just the original; COS renders the smaller variants on request."""
+    _put_object(client, key=object_key, body=original, content_type=mime_type)
 
 
 def _remove_local_variants(stored_name: str) -> None:
@@ -248,14 +236,10 @@ def store_image(
             thumbnail_key=thumbnail_key,
         )
     try:
-        _upload_variants(
+        _upload_original(
             client or _client(),
             object_key=object_key,
-            preview_key=preview_key,
-            thumbnail_key=thumbnail_key,
             original=content,
-            preview=preview,
-            thumbnail=thumbnail,
             mime_type=mime_type,
         )
     except Exception:
@@ -304,21 +288,19 @@ def signed_url(
     download_name: str | None = None,
     client: Any | None = None,
 ) -> str:
-    key_name = {
-        "original": "object_key",
-        "preview": "preview_key",
-        "thumbnail": "thumbnail_key",
-    }[variant]
-    key = row.get(key_name)
+    key = row.get("object_key")
     if not key:
         raise RuntimeError("cos_read_error")
-    cache_key = (str(key), download_name)
+    cache_key = (str(key), variant, download_name)
     now = time.monotonic()
     cached = _SIGNED_URL_CACHE.get(cache_key)
     if cached is not None and cached[0] > now:
         _SIGNED_URL_CACHE.move_to_end(cache_key)
         return cached[1]
     params: dict[str, str] = {}
+    processing = _COS_VARIANT_PROCESSING.get(variant)
+    if processing:
+        params[processing] = ""
     if download_name:
         encoded = quote(download_name, safe="")
         params["response-content-disposition"] = (
@@ -372,14 +354,10 @@ def retry_pending_uploads_once(client: Any | None = None) -> int:
     for row in rows:
         preview_name, thumbnail_name = _local_variant_names(row["stored_name"])
         try:
-            _upload_variants(
+            _upload_original(
                 cos_client,
                 object_key=row["object_key"],
-                preview_key=row["preview_key"],
-                thumbnail_key=row["thumbnail_key"],
                 original=(media_dir() / row["stored_name"]).read_bytes(),
-                preview=(media_dir() / preview_name).read_bytes(),
-                thumbnail=(media_dir() / thumbnail_name).read_bytes(),
                 mime_type=row["mime_type"],
             )
         except Exception:

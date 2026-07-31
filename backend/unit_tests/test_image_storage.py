@@ -95,26 +95,22 @@ def test_defer_upload_skips_cos_and_marks_pending(tmp_path, monkeypatch) -> None
     assert (media_dir() / stored.stored_name).is_file()
 
 
-def test_large_original_uploads_in_parts_and_small_variants_do_not(monkeypatch) -> None:
+def test_large_upload_is_split_into_parts_and_small_one_is_not(monkeypatch) -> None:
     configure_cos(monkeypatch, True)
     monkeypatch.setattr(settings, "COS_MULTIPART_THRESHOLD_BYTES", 1024)
     client = FakeCosClient()
-    original = b"x" * 4096
+    large = b"x" * 4096
 
-    image_storage._upload_variants(
-        client,
-        object_key="key/original.png",
-        preview_key="key/preview.webp",
-        thumbnail_key="key/thumbnail.webp",
-        original=original,
-        preview=b"small-preview",
-        thumbnail=b"small-thumb",
-        mime_type="image/png",
+    image_storage._upload_original(
+        client, object_key="key/big.png", original=large, mime_type="image/png"
+    )
+    image_storage._upload_original(
+        client, object_key="key/small.png", original=b"tiny", mime_type="image/png"
     )
 
-    assert client.multipart_keys == ["key/original.png"]
-    assert client.objects["key/original.png"] == original
-    assert client.objects["key/preview.webp"] == b"small-preview"
+    assert client.multipart_keys == ["key/big.png"]
+    assert client.objects["key/big.png"] == large
+    assert client.objects["key/small.png"] == b"tiny"
 
 
 class SigningCosClient:
@@ -139,6 +135,30 @@ def test_signed_url_is_stable_across_polls(monkeypatch) -> None:
     # A changing URL would bust the browser cache on every 2.5s poll.
     assert first == second
     assert client.calls == 1
+
+
+def test_variants_are_derived_from_the_original_via_cos_processing(monkeypatch) -> None:
+    configure_cos(monkeypatch, True)
+    image_storage._SIGNED_URL_CACHE.clear()
+    captured: list[dict[str, str]] = []
+
+    class Recorder:
+        def get_presigned_url(self, *, Key: str, Params: dict[str, str], **_: object) -> str:
+            captured.append({"key": Key, **Params})
+            return f"https://bucket.cos.example/{Key}"
+
+    # No preview_key/thumbnail_key: those objects are never uploaded any more.
+    row = {"object_key": "maolao/a/original.png"}
+    client = Recorder()
+
+    image_storage.signed_url(row, "original", client=client)
+    image_storage.signed_url(row, "preview", client=client)
+    image_storage.signed_url(row, "thumbnail", client=client)
+
+    assert all(entry["key"] == "maolao/a/original.png" for entry in captured)
+    assert "imageMogr2/thumbnail/1440x1440" in captured[1]
+    assert "imageMogr2/thumbnail/480x480" in captured[2]
+    assert not any(name.startswith("imageMogr2") for name in captured[0])
 
 
 def test_signed_url_separates_download_disposition(monkeypatch) -> None:
@@ -216,10 +236,9 @@ def test_cos_upload_uses_scoped_keys_and_removes_local_copy(
 
     assert stored.storage_backend == "cos"
     assert stored.storage_status == "ready"
+    # Only the original ships; COS renders preview/thumbnail on request.
     assert set(client.objects) == {
         "maolao/conversation-1/turn-1/image-1/original.png",
-        "maolao/conversation-1/turn-1/image-1/preview.webp",
-        "maolao/conversation-1/turn-1/image-1/thumbnail.webp",
     }
     assert not (media_dir() / stored.stored_name).exists()
 
