@@ -56,6 +56,10 @@ def test_client_uses_configured_api_endpoint(monkeypatch) -> None:
     image_storage._client()
     assert captured["Endpoint"] == "cos-internal.ap-guangzhou.myqcloud.com"
 
+    # Browsers cannot resolve a VPC-internal host, so signing must ignore it.
+    image_storage._public_client()
+    assert captured["Endpoint"] is None
+
     monkeypatch.setattr(settings, "COS_API_ENDPOINT", "")
     image_storage._client()
     assert captured["Endpoint"] is None

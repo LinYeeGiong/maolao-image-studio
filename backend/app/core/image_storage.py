@@ -39,15 +39,30 @@ def cos_is_configured() -> bool:
     )
 
 
-def _client() -> CosS3Client:
+def _build_client(endpoint: str | None) -> CosS3Client:
     config = CosConfig(
         Region=settings.COS_REGION,
         SecretId=settings.COS_SECRET_ID,
         SecretKey=settings.COS_SECRET_KEY,
         Scheme="https",
-        Endpoint=settings.COS_API_ENDPOINT or None,
+        Endpoint=endpoint or None,
     )
     return CosS3Client(config)
+
+
+def _client() -> CosS3Client:
+    """Client for server-side data transfer, which may take a private route."""
+    return _build_client(settings.COS_API_ENDPOINT)
+
+
+def _public_client() -> CosS3Client:
+    """Client for signing URLs handed to browsers.
+
+    These must always name the public endpoint: a browser cannot resolve a
+    VPC-internal host, so signing with COS_API_ENDPOINT would hand out URLs
+    that only the server itself can reach.
+    """
+    return _build_client(None)
 
 
 def _safe_segment(value: str) -> str:
@@ -282,7 +297,7 @@ def signed_url(
             f"attachment; filename*=UTF-8''{encoded}"
         )
     try:
-        return (client or _client()).get_presigned_url(
+        return (client or _public_client()).get_presigned_url(
             Method="GET",
             Bucket=settings.COS_BUCKET,
             Key=key,
