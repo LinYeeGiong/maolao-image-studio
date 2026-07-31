@@ -137,6 +137,12 @@ def _classify_exception(exc: Exception) -> ProviderFailure:
         return ProviderFailure("unknown_submission", "Provider response timed out after the request was sent")
     if isinstance(exc, httpx.TimeoutException):
         return ProviderFailure("recoverable", "Upstream request timed out")
+    if isinstance(exc, httpx.DecodingError) or (
+        isinstance(exc, RuntimeError) and "stream was corrupted" in str(exc)
+    ):
+        # Transient transport corruption (e.g. a gzip stream cut short by the
+        # upstream CDN), not a permanent problem with the request itself.
+        return ProviderFailure("recoverable", "Downloaded image data was corrupted in transit")
     return ProviderFailure("fatal", _safe_message(str(exc) or type(exc).__name__))
 
 

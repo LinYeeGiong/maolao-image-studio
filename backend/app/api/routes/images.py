@@ -141,79 +141,88 @@ async def download_generated_image(
     if attempts < 1:
         raise ValueError("Download attempts must be at least 1")
     for attempt in range(attempts):
-        async with client.stream(
-            "GET",
-            request.url,
-            headers=request.headers,
-            follow_redirects=False,
-        ) as response:
-            if response.is_success:
-                media_type = (
-                    response.headers.get("content-type", "").split(";")[0].lower()
-                )
-                if media_type not in ALLOWED_GENERATED_IMAGE_TYPES:
-                    raise RuntimeError(
-                        "Downloaded result has an unsupported image content type"
+        try:
+            async with client.stream(
+                "GET",
+                request.url,
+                headers=request.headers,
+                follow_redirects=False,
+            ) as response:
+                if response.is_success:
+                    media_type = (
+                        response.headers.get("content-type", "").split(";")[0].lower()
                     )
-                content_length = response.headers.get("content-length")
-                if content_length:
-                    try:
-                        if int(content_length) > max_bytes:
-                            raise RuntimeError(
-                                "Downloaded image exceeds the size limit"
-                            )
-                    except ValueError:
-                        pass
-                content = bytearray()
+                    if media_type not in ALLOWED_GENERATED_IMAGE_TYPES:
+                        raise RuntimeError(
+                            "Downloaded result has an unsupported image content type"
+                        )
+                    content_length = response.headers.get("content-length")
+                    if content_length:
+                        try:
+                            if int(content_length) > max_bytes:
+                                raise RuntimeError(
+                                    "Downloaded image exceeds the size limit"
+                                )
+                        except ValueError:
+                            pass
+                    content = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        content.extend(chunk)
+                        if len(content) > max_bytes:
+                            raise RuntimeError("Downloaded image exceeds the size limit")
+                    image_content = bytes(content)
+                    valid_signature = (
+                        media_type == "image/png"
+                        and image_content.startswith(b"\x89PNG\r\n\x1a\n")
+                        or media_type == "image/jpeg"
+                        and image_content.startswith(b"\xff\xd8\xff")
+                        or media_type == "image/webp"
+                        and len(image_content) >= 12
+                        and image_content.startswith(b"RIFF")
+                        and image_content[8:12] == b"WEBP"
+                    )
+                    if not valid_signature:
+                        raise RuntimeError(
+                            "Downloaded result is not a valid supported image"
+                        )
+                    return httpx.Response(
+                        response.status_code,
+                        headers=response.headers,
+                        content=image_content,
+                        request=response.request,
+                    )
+                error_content = bytearray()
                 async for chunk in response.aiter_bytes():
-                    content.extend(chunk)
-                    if len(content) > max_bytes:
-                        raise RuntimeError("Downloaded image exceeds the size limit")
-                image_content = bytes(content)
-                valid_signature = (
-                    media_type == "image/png"
-                    and image_content.startswith(b"\x89PNG\r\n\x1a\n")
-                    or media_type == "image/jpeg"
-                    and image_content.startswith(b"\xff\xd8\xff")
-                    or media_type == "image/webp"
-                    and len(image_content) >= 12
-                    and image_content.startswith(b"RIFF")
-                    and image_content[8:12] == b"WEBP"
-                )
-                if not valid_signature:
-                    raise RuntimeError(
-                        "Downloaded result is not a valid supported image"
-                    )
-                return httpx.Response(
+                    remaining = max_error_bytes - len(error_content)
+                    if remaining <= 0:
+                        break
+                    error_content.extend(chunk[:remaining])
+                error_response = httpx.Response(
                     response.status_code,
                     headers=response.headers,
-                    content=image_content,
+                    content=bytes(error_content),
                     request=response.request,
                 )
-            error_content = bytearray()
-            async for chunk in response.aiter_bytes():
-                remaining = max_error_bytes - len(error_content)
-                if remaining <= 0:
-                    break
-                error_content.extend(chunk[:remaining])
-            error_response = httpx.Response(
-                response.status_code,
-                headers=response.headers,
-                content=bytes(error_content),
-                request=response.request,
-            )
-            retryable = (
-                response.status_code
-                in {
-                    404,
-                    409,
-                    425,
-                    429,
-                }
-                or 500 <= response.status_code <= 599
-            )
-            if not retryable or attempt + 1 == attempts:
-                raise RuntimeError(_upstream_error(error_response))
+                retryable = (
+                    response.status_code
+                    in {
+                        404,
+                        409,
+                        425,
+                        429,
+                    }
+                    or 500 <= response.status_code <= 599
+                )
+                if not retryable or attempt + 1 == attempts:
+                    raise RuntimeError(_upstream_error(error_response))
+        except httpx.DecodingError as exc:
+            # The stream (often gzip over chunked transfer) was corrupted or
+            # cut short in transit. This is transient, not a permanent
+            # failure of the request itself, so retry the download.
+            if attempt + 1 == attempts:
+                raise RuntimeError(
+                    f"Downloaded image stream was corrupted: {exc}"
+                ) from exc
         await asyncio.sleep(retry_delay_seconds)
     raise RuntimeError("Image download attempts exhausted")
 

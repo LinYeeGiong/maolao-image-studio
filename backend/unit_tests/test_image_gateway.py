@@ -213,6 +213,83 @@ def test_retries_temporary_download_failure_then_returns_image() -> None:
     assert attempts == 2
 
 
+def test_retries_corrupted_gzip_stream_then_returns_image() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            # Claims gzip content-encoding but the body is not valid gzip,
+            # simulating a CDN stream that was cut short or corrupted.
+            return httpx.Response(
+                200,
+                content=b"not-actually-gzip-data",
+                headers={"content-type": "image/png", "content-encoding": "gzip"},
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            content=b"\x89PNG\r\n\x1a\npng-data",
+            headers={"content-type": "image/png"},
+            request=request,
+        )
+
+    async def run() -> httpx.Response:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            request = build_image_download_request(
+                result_item={
+                    "url": "https://example-bucket.s3.amazonaws.com/result.png"
+                },
+                upstream_task_id="task-1",
+                index=0,
+                base_url="https://maolaoapi.com",
+                api_headers={"Authorization": "Bearer secret"},
+            )
+            return await download_generated_image(
+                client,
+                request,
+                attempts=3,
+                retry_delay_seconds=0,
+            )
+
+    response = asyncio.run(run())
+
+    assert response.content == b"\x89PNG\r\n\x1a\npng-data"
+    assert attempts == 2
+
+
+def test_raises_clear_error_when_stream_stays_corrupted() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b"not-actually-gzip-data",
+            headers={"content-type": "image/png", "content-encoding": "gzip"},
+            request=request,
+        )
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            request = build_image_download_request(
+                result_item={
+                    "url": "https://example-bucket.s3.amazonaws.com/result.png"
+                },
+                upstream_task_id="task-1",
+                index=0,
+                base_url="https://maolaoapi.com",
+                api_headers={"Authorization": "Bearer secret"},
+            )
+            await download_generated_image(
+                client,
+                request,
+                attempts=2,
+                retry_delay_seconds=0,
+            )
+
+    with pytest.raises(RuntimeError, match="corrupted"):
+        asyncio.run(run())
+
+
 def test_does_not_retry_permanent_download_failure() -> None:
     attempts = 0
 

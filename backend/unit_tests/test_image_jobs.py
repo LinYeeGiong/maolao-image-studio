@@ -78,3 +78,22 @@ def test_classifies_rate_limit_as_recoverable() -> None:
 
 def test_relayrouter_supports_reference_image_editing() -> None:
     assert image_jobs._provider_supports_references("relayrouter") is True
+
+
+def test_classifies_decoding_error_as_recoverable() -> None:
+    request = httpx.Request("GET", "https://maolaoapi.com/v1/images/tasks/task-1/content/0")
+    exc = httpx.DecodingError("Error -3 while decompressing data: incorrect header check", request=request)
+
+    failure = image_jobs._classify_exception(exc)
+
+    assert failure.kind == "recoverable"
+
+
+def test_classifies_exhausted_corrupted_download_retries_as_recoverable() -> None:
+    exc = RuntimeError(
+        "Downloaded image stream was corrupted: Error -3 while decompressing data: incorrect header check"
+    )
+
+    failure = image_jobs._classify_exception(exc)
+
+    assert failure.kind == "recoverable"
